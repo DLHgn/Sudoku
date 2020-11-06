@@ -1,3 +1,4 @@
+import time
 import test_functions
 import random
 
@@ -24,16 +25,28 @@ for y in range(1, 9):
     random.shuffle(new_row)
     exit_while = False
     while exit_while == False:
+        # if on last row, determine necessary row instead of randomly stumbling upon it.
+        if y == 8:
+            grid.append([0, 0, 0, 0, 0, 0, 0, 0, 0])
+            if y == 8:
+                for sumX in range(9):
+                    sum = 0
+                    for sumY in range(9):
+                        # sum of all numbers in a column/row should equal 45.
+                        if sumY < 8:
+                            sum += grid[sumY][sumX]
+                        else:
+                            grid[sumY][sumX] = 45 - sum
+            exit_while = True
         # test if new row passes column test and box test
-        if test_functions.check_col(grid, new_row, number_of_rows) and \
+        elif test_functions.check_col(grid, new_row, number_of_rows) and \
                 test_functions.check_box(grid, y, new_row, number_of_rows):
             # if so, exit while loop
             exit_while = True
+            grid.append(new_row.copy())
         else:
             # if not, generate new row and check again
             random.shuffle(new_row)
-    # once a passing row is found, add it to the grid list like before
-    grid.append(new_row.copy())
     number_of_rows += 1
 
 # used for testing output
