@@ -59,6 +59,23 @@ APPEARANCES = ["System", "Light", "Dark"]
 LINE_MIN, LINE_MAX = 1, 8
 CELL_PX = 46
 
+
+def _contrast_text(bg_hex):
+    """Return '#000000' or '#ffffff', whichever is more readable on bg_hex.
+
+    Uses the perceived-luminance formula (WCAG-style channel weights): green
+    contributes most to brightness, blue least. A light background gets black
+    text; a dark one gets white. Works for any color, including white/black."""
+    h = bg_hex.lstrip("#")
+    if len(h) == 3:                     # expand shorthand like #abc
+        h = "".join(ch * 2 for ch in h)
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return "#000000"                # unparseable -> safe default
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#000000" if luminance > 0.55 else "#ffffff"
+
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "sudoku_settings.json")
 
@@ -280,20 +297,25 @@ class SudokuGUI:
     # ---- interaction -----------------------------------------------------
 
     def _on_focus(self, rc):
+        mode = self._mode()
         if self.selected and self.selected in self.cells:
             prev = self.cells[self.selected]
             if prev["state"] != "disabled":
-                prev.config(bg=_resolve(CELL_BG, self._mode()))
+                # Restore the vacated cell's normal background and digit color.
+                prev.config(bg=_resolve(CELL_BG, mode), fg=_resolve(USER_FG, mode))
         self.selected = rc
         cell = self.cells[rc]
         if cell["state"] != "disabled":
-            cell.config(bg=self.settings["highlight_bg"])
+            hl = self.settings["highlight_bg"]
+            # Text color is derived from the highlight so it stays readable for
+            # ANY chosen highlight color (white, black, or anything between).
+            cell.config(bg=hl, fg=_contrast_text(hl))
 
     def _on_type(self, rc):
         cell = self.cells[rc]
         if cell["state"] != "disabled":
-            cell.config(bg=self.settings["highlight_bg"],
-                        fg=_resolve(USER_FG, self._mode()))
+            hl = self.settings["highlight_bg"]
+            cell.config(bg=hl, fg=_contrast_text(hl))
         if self._is_complete() and self._is_correct():
             self.status.configure(text="Solved! Well done.")
             messagebox.showinfo("Sudoku", "You solved it!")
@@ -315,12 +337,14 @@ class SudokuGUI:
 
     def check(self):
         wrong = 0
+        err_bg = self.settings["error_bg"]
+        err_fg = _contrast_text(err_bg)
         for (r, c), e in self.cells.items():
             if e["state"] == "disabled":
                 continue
             v = e.get()
             if v.isdigit() and int(v) != self.solution[r][c]:
-                e.config(bg=self.settings["error_bg"])
+                e.config(bg=err_bg, fg=err_fg)
                 wrong += 1
         if wrong == 0:
             self.status.configure(
