@@ -14,6 +14,7 @@ persist to a JSON file next to this script.
 
 import json
 import os
+import threading
 import tkinter as tk
 
 import customtkinter as ctk
@@ -26,6 +27,7 @@ except ImportError:
     darkdetect = None
 
 import sudoku
+import solver
 
 SIZE = 9
 BOX = 3
@@ -173,6 +175,8 @@ class SudokuGUI:
         self.solved_cells = set()  # (r, c) filled by the Solve button
         self.selected = None
         self.notes_mode = False  # when True, typed digits toggle notes
+        self._generating = False
+        self._gen_result = None
 
         self._build_grid()
         self._build_controls()
@@ -388,13 +392,44 @@ class SudokuGUI:
     # ---- game lifecycle --------------------------------------------------
 
     def new_game(self, difficulty):
-        clues_removed = DIFFICULTIES.get(difficulty, 50)
-        self.status.configure(text="Generating...")
-        self.root.update_idletasks()
-        self.puzzle, self.solution = sudoku.make_puzzle(clues_removed=clues_removed)
+        # Rated generation can take several seconds (it generates and grades many
+        # candidates), so run it off the main thread to keep the UI responsive.
+        # The worker only writes to a plain attribute; the main thread polls it
+        # via _poll_generation (Tk calls must stay on the main thread).
+        if getattr(self, "_generating", False):
+            return                      # ignore clicks while a game is brewing
+        self._generating = True
+        self._gen_result = None
+        self.status.configure(text=f"Generating a {difficulty} puzzle...")
+        self.difficulty_menu.configure(state="disabled")
+
+        def work():
+            puzzle, solution, actual = sudoku.make_rated_puzzle(
+                difficulty, rater=solver.rate)
+            self._gen_result = (puzzle, solution, difficulty, actual)
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_generation()
+
+    def _poll_generation(self):
+        """Main-thread poll for the worker's result; reschedules itself."""
+        if self._gen_result is None:
+            self.root.after(50, self._poll_generation)
+            return
+        puzzle, solution, requested, actual = self._gen_result
+        self._gen_result = None
+        self.puzzle, self.solution = puzzle, solution
         self.selected = None
         self._render_puzzle()
-        self.status.configure(text=f"New game ({difficulty}). Good luck!")
+        self._generating = False
+        self.difficulty_menu.configure(state="normal")
+        if actual == requested:
+            self.status.configure(text=f"New game ({requested}). Good luck!")
+        else:
+            # Couldn't hit the exact tier within the attempt budget; we used the
+            # closest. Be honest rather than mislabel the puzzle.
+            self.status.configure(
+                text=f"New game (closest to {requested}: {actual}). Good luck!")
 
     def _render_puzzle(self):
         """Reset the model from the freshly generated puzzle and redraw."""

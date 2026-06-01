@@ -118,6 +118,51 @@ def make_puzzle(clues_removed=50):
     return puzzle, solution
 
 
+# Removal targets to bias generation toward a tier. Harder tiers strip more
+# clues, which tends to demand harder techniques; the rater then confirms.
+_TIER_REMOVAL = {
+    "Beginner": 40,
+    "Easy": 46,
+    "Intermediate": 52,
+    "Expert": 58,
+}
+
+
+def make_rated_puzzle(tier, max_attempts=400, rater=None):
+    """Generate a uniquely-solvable puzzle whose human-solving difficulty
+    matches `tier`, as judged by the rater (solver.rate).
+
+    Generation is candidate-and-test: make a puzzle, rate it, keep it if it
+    matches the requested tier. Returns (puzzle, solution, actual_tier). If no
+    exact match is found within max_attempts, returns the closest one generated
+    so the caller always gets a playable puzzle.
+
+    rater: callable(grid) -> (tier_name, level, log). Injected to avoid a hard
+    import cycle; callers pass solver.rate.
+    """
+    if rater is None:
+        import solver
+        rater = solver.rate
+
+    target_removed = _TIER_REMOVAL.get(tier, 50)
+    # Track the closest fallback by tier distance, in case we never hit exact.
+    order = ["Beginner", "Easy", "Intermediate", "Expert"]
+    target_idx = order.index(tier) if tier in order else 1
+    best = None  # (distance, puzzle, solution, actual_tier)
+
+    for _ in range(max_attempts):
+        puzzle, solution = make_puzzle(clues_removed=target_removed)
+        actual, level, _log = rater(puzzle)
+        if actual == tier:
+            return puzzle, solution, actual
+        # Remember the nearest-tier candidate as a fallback.
+        dist = abs(order.index(actual) - target_idx) if actual in order else 9
+        if best is None or dist < best[0]:
+            best = (dist, puzzle, solution, actual)
+
+    return best[1], best[2], best[3]
+
+
 def format_grid(grid):
     """Pretty-print a grid with box separators; 0 shown as '.'."""
     lines = []
