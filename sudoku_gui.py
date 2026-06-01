@@ -156,10 +156,11 @@ class SudokuGUI:
 
         self.puzzle = None
         self.solution = None
-        self.cells = {}          # (r, c) -> Entry display widget
+        self.all_cells = [(r, c) for r in range(SIZE) for c in range(SIZE)]
         self.values = {}         # (r, c) -> int 0..9 (0 = no big value)
-        self.notes = {}          # (r, c) -> list[int] of candidate notes
+        self.notes = {}          # (r, c) -> list[int] of candidate notes (entry order)
         self.given = set()       # (r, c) of locked clue cells
+        self.solved_cells = set()  # (r, c) filled by the Solve button
         self.selected = None
         self.notes_mode = False  # when True, typed digits toggle notes
 
@@ -171,39 +172,35 @@ class SudokuGUI:
     # ---- UI construction -------------------------------------------------
 
     def _build_grid(self):
-        # Canvas grid: lines drawn as exact-pixel rectangles, Entry cells placed
-        # on top. Precise widths, DPI-independent.
+        # The board is a Canvas. Cell backgrounds are rectangles, cell contents
+        # (big values and 3x3 notes) are canvas text. A single off-screen Entry
+        # holds keyboard focus; clicks select cells. This avoids the layering
+        # limits of placing 81 widgets on a canvas (notes can sit "in" a cell).
         self.canvas = ctk.CTkCanvas(self.root, highlightthickness=0, bd=0)
         self.canvas.grid(row=0, column=0, padx=16, pady=16)
 
-        for r in range(SIZE):
-            for c in range(SIZE):
-                # The Entry is display-only: we manage its text ourselves from
-                # the value/notes model, so it can show either one big digit or
-                # a small space-separated notes string. readonly blocks direct
-                # editing; all input flows through _on_key.
-                e = tk.Entry(self.canvas, width=2,
-                             font=("Helvetica", 20, "bold"),
-                             justify="center", bd=0, relief="flat",
-                             highlightthickness=0, state="readonly",
-                             readonlybackground="#ffffff")
-                e.bind("<FocusIn>", lambda ev, rc=(r, c): self._on_focus(rc))
-                # Bind Shift-digit explicitly so Tk itself detects the modifier
-                # (cross-platform), rather than us decoding a raw state bitmask
-                # whose value differs between macOS/Windows/Linux.
-                e.bind("<Key>", lambda ev, rc=(r, c): self._on_key(ev, rc, False))
-                e.bind("<Shift-Key>", lambda ev, rc=(r, c): self._on_key(ev, rc, True))
-                self.cells[(r, c)] = e
+        self.cell_rect = {}     # (r, c) -> canvas rectangle id (background)
+        self.cell_origin = {}   # (r, c) -> (x, y) top-left pixel
+
+        # Hidden entry purely to own keyboard focus and receive key events.
+        self.focus_sink = tk.Entry(self.canvas, width=1)
+        self.focus_sink.place(x=-100, y=-100)   # off-screen
+        self.focus_sink.bind("<Key>",
+                             lambda ev: self._on_key(ev, self.selected, False))
+        self.focus_sink.bind("<Shift-Key>",
+                             lambda ev: self._on_key(ev, self.selected, True))
+
+        self.canvas.bind("<Button-1>", self._on_click)
 
         self._layout_grid()
 
     def _layout_grid(self):
-        """(Re)compute geometry from current line widths; draw lines; place cells."""
+        """(Re)compute geometry from current line widths; draw lines, cell
+        backgrounds, and all cell contents."""
         cell_w = int(self.settings["cell_line"])
         box_w = int(self.settings["box_line"])
         mode = self._mode()
         line_color = _resolve(LINE_COLOR, mode)
-        cell_bg = _resolve(CELL_BG, mode)
 
         def line_at(i):
             return box_w if (i % BOX == 0) else cell_w
@@ -213,93 +210,102 @@ class SudokuGUI:
             offsets.append(offsets[-1] + line_at(i) + CELL_PX)
         total = offsets[-1] + box_w
 
-        # Canvas background = line color (the lines are the gaps showing through).
         self.canvas.config(width=total, height=total, bg=line_color)
-        self.canvas.delete("grid")
+        self.canvas.delete("all")
+        self.cell_rect = {}
+        self.cell_origin = {}
 
+        # Grid lines (rectangles so width is exact).
         pos = 0
         for i in range(SIZE + 1):
             w = line_at(i)
             self.canvas.create_rectangle(pos, 0, pos + w, total,
-                                         fill=line_color, width=0, tags="grid")
+                                         fill=line_color, width=0)
             self.canvas.create_rectangle(0, pos, total, pos + w,
-                                         fill=line_color, width=0, tags="grid")
+                                         fill=line_color, width=0)
             if i < SIZE:
                 pos += w + CELL_PX
 
+        # Cell backgrounds + contents.
         for r in range(SIZE):
             for c in range(SIZE):
                 x = offsets[c] + line_at(c)
                 y = offsets[r] + line_at(r)
-                e = self.cells[(r, c)]
-                e.place(x=x, y=y, width=CELL_PX, height=CELL_PX)
-                self._render_cell_text((r, c))
+                self.cell_origin[(r, c)] = (x, y)
+                rect = self.canvas.create_rectangle(
+                    x, y, x + CELL_PX, y + CELL_PX, width=0,
+                    fill=_resolve(CELL_BG, mode))
+                self.cell_rect[(r, c)] = rect
                 self._paint_cell((r, c))
+                self._render_cell_text((r, c))
 
     BIG_FONT = ("Helvetica", 20, "bold")
-    # A thin space between notes keeps the digits visually distinct ("1 3 9",
-    # not "139") while using less width than a normal space, so even all nine
-    # candidates fit inside a cell.
-    NOTE_SEP = "\u2009"
+    NOTE_FONT = ("Helvetica", 11)
 
-    def _note_font(self, text):
-        """Pick the largest notes font size at which `text` actually fits inside
-        the cell, measured rather than guessed. Correct for any note count, cell
-        size, or platform font metrics."""
-        usable = CELL_PX - 4          # small margin so text never touches edges
-        for size in range(12, 3, -1):  # try 12pt down to a 4pt floor
-            f = tkfont.Font(family="Helvetica", size=size)
-            if f.measure(text) <= usable:
-                return ("Helvetica", size)
-        return ("Helvetica", 4)        # floor: smallest we'll go
+    def _content_tag(self, rc):
+        return "content_%d_%d" % rc
 
     def _render_cell_text(self, rc):
-        """Write the cell's display text + font from the model (big value or
-        notes string)."""
-        e = self.cells[rc]
+        """Draw the cell's contents on the canvas: a big centered value, or a
+        3x3 grid of notes filled by ENTRY ORDER (1st -> top-left, 2nd ->
+        top-middle, ... reading across), or nothing."""
+        self.canvas.delete(self._content_tag(rc))
+        if rc not in self.cell_origin:
+            return
+        ox, oy = self.cell_origin[rc]
+        mode = self._mode()
         val = self.values.get(rc, 0)
         notes = self.notes.get(rc, [])
-        e.config(state="normal")
-        e.delete(0, tk.END)
+
         if val != 0:
-            e.insert(0, str(val))
-            e.config(font=self.BIG_FONT)
+            fg = self._value_color(rc, mode)
+            self.canvas.create_text(ox + CELL_PX / 2, oy + CELL_PX / 2,
+                                    text=str(val), fill=fg, font=self.BIG_FONT,
+                                    tags=self._content_tag(rc))
         elif notes:
-            text = self.NOTE_SEP.join(str(n) for n in notes)
-            e.insert(0, text)
-            e.config(font=self._note_font(text))
-        else:
-            e.config(font=self.BIG_FONT)
-        e.config(state="readonly")
+            color = _resolve(NOTE_FG, mode)
+            third = CELL_PX / 3
+            for i, n in enumerate(notes[:9]):
+                sr, sc = divmod(i, 3)            # fill across then down
+                cx = ox + third * (sc + 0.5)
+                cy = oy + third * (sr + 0.5)
+                self.canvas.create_text(cx, cy, text=str(n), fill=color,
+                                        font=self.NOTE_FONT,
+                                        tags=self._content_tag(rc))
+
+    def _value_color(self, rc, mode):
+        """Foreground for a big value, accounting for given/selected/wrong."""
+        if rc in self.given:
+            return _resolve(GIVEN_FG, mode)
+        if rc == self.selected:
+            return _contrast_text(self.settings["highlight_bg"])
+        val = self.values.get(rc, 0)
+        if (self.settings["auto_check"] and val != 0
+                and self.solution is not None
+                and val != self.solution[rc[0]][rc[1]]):
+            return _contrast_text(self.settings["error_bg"])
+        if rc in self.solved_cells:
+            return _resolve(SOLVED_FG, mode)
+        return _resolve(USER_FG, mode)
 
     def _paint_cell(self, rc):
-        """Set a cell's colors from its current state: given -> fixed clue look,
-        selected -> highlight, wrong big value (auto-check) -> error, else normal.
-        Notes are never flagged as wrong."""
-        cell = self.cells[rc]
+        """Set a cell's background rectangle color from its state: selected ->
+        highlight, wrong big value (auto-check) -> error, else normal. Then
+        refresh its contents so value colors track the background."""
+        if rc not in self.cell_rect:
+            return
         mode = self._mode()
-        if rc in self.given:
-            cell.config(readonlybackground=_resolve(CELL_BG, mode),
-                        fg=_resolve(GIVEN_FG, mode))
-            return
-        if rc == self.selected:
-            hl = self.settings["highlight_bg"]
-            cell.config(readonlybackground=hl, fg=_contrast_text(hl))
-            return
-        val = self.values.get(rc, 0)
-        wrong = (self.settings["auto_check"] and val != 0
-                 and self.solution is not None
-                 and val != self.solution[rc[0]][rc[1]])
-        if wrong:
-            err = self.settings["error_bg"]
-            cell.config(readonlybackground=err, fg=_contrast_text(err))
-        elif self.values.get(rc, 0) == 0 and self.notes.get(rc):
-            # Notes use a dimmer foreground so they read as provisional.
-            cell.config(readonlybackground=_resolve(CELL_BG, mode),
-                        fg=_resolve(NOTE_FG, mode))
+        if rc == self.selected and rc not in self.given:
+            bg = self.settings["highlight_bg"]
         else:
-            cell.config(readonlybackground=_resolve(CELL_BG, mode),
-                        fg=_resolve(USER_FG, mode))
+            val = self.values.get(rc, 0)
+            wrong = (self.settings["auto_check"] and val != 0
+                     and rc not in self.given and self.solution is not None
+                     and val != self.solution[rc[0]][rc[1]])
+            bg = self.settings["error_bg"] if wrong else _resolve(CELL_BG, mode)
+        self.canvas.itemconfig(self.cell_rect[rc], fill=bg)
+        # Redraw contents so the value's foreground matches the new background.
+        self._render_cell_text(rc)
 
     def _build_controls(self):
         self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -364,25 +370,39 @@ class SudokuGUI:
         self.values = {}
         self.notes = {}
         self.given = set()
-        for r in range(SIZE):
-            for c in range(SIZE):
-                v = self.puzzle[r][c]
-                self.values[(r, c)] = v
-                self.notes[(r, c)] = []
-                if v != 0:
-                    self.given.add((r, c))
-        for rc in self.cells:
-            self._render_cell_text(rc)
+        self.solved_cells = set()
+        for (r, c) in self.all_cells:
+            v = self.puzzle[r][c]
+            self.values[(r, c)] = v
+            self.notes[(r, c)] = []
+            if v != 0:
+                self.given.add((r, c))
+        for rc in self.all_cells:
             self._paint_cell(rc)
+            self._render_cell_text(rc)
 
     # ---- interaction -----------------------------------------------------
 
-    def _on_focus(self, rc):
+    def _cell_at(self, px, py):
+        """Return the (r, c) whose pixel box contains (px, py), or None."""
+        for rc, (ox, oy) in self.cell_origin.items():
+            if ox <= px < ox + CELL_PX and oy <= py < oy + CELL_PX:
+                return rc
+        return None
+
+    def _on_click(self, event):
+        rc = self._cell_at(self.canvas.canvasx(event.x),
+                            self.canvas.canvasy(event.y))
+        if rc is not None:
+            self._select(rc)
+        self.focus_sink.focus_set()   # keep keyboard input flowing
+
+    def _select(self, rc):
         prev = self.selected
         self.selected = rc
-        if prev and prev in self.cells and prev != rc:
-            self._paint_cell(prev)   # repaint (and possibly flag) the cell we left
-        self._paint_cell(rc)         # highlight the newly selected cell
+        if prev and prev != rc:
+            self._paint_cell(prev)    # repaint (and possibly flag) the cell we left
+        self._paint_cell(rc)          # highlight the newly selected cell
 
     # Some keyboard layouts report Shift+digit as the symbol keysym rather than
     # the digit. Map those back so Shift-noting works regardless of layout.
@@ -392,11 +412,10 @@ class SudokuGUI:
     }
 
     def _on_key(self, event, rc, shift):
-        """Handle a keystroke on a cell. `shift` is True when this came from the
-        <Shift-Key> binding. Returns 'break' to suppress the Entry's own default
-        handling (cells are display-only; we own all edits)."""
-        if rc in self.given:
-            return "break"          # can't edit clue cells
+        """Handle a keystroke for the selected cell. `shift` is True when from
+        the <Shift-Key> binding. Returns 'break' to suppress default handling."""
+        if rc is None or rc in self.given:
+            return "break"          # nothing selected, or a clue cell
         key = event.keysym
         # Resolve the digit: prefer a plain digit keysym; otherwise translate a
         # shifted-symbol keysym (layout-dependent) back to its digit.
@@ -422,10 +441,11 @@ class SudokuGUI:
 
     def _set_value(self, rc, d):
         self.values[rc] = d
+        self.solved_cells.discard(rc)   # a player value is no longer "solved"
         if self.settings["notes_clear"]:
             self.notes[rc] = []     # entering a real number clears notes (setting)
-        self._render_cell_text(rc)
         self._paint_cell(rc)
+        self._render_cell_text(rc)
         self._check_win()
 
     def _toggle_note(self, rc, d):
@@ -436,18 +456,19 @@ class SudokuGUI:
             notes.remove(d)         # typing an existing note removes it
         else:
             notes.append(d)         # kept in entry order (left-to-right)
-        self._render_cell_text(rc)
         self._paint_cell(rc)
+        self._render_cell_text(rc)
 
     def _clear_cell(self, rc):
         # Staged clear: if a big value is present, remove just the value (which
         # reveals any preserved notes); otherwise clear the notes.
         if self.values.get(rc, 0) != 0:
             self.values[rc] = 0
+            self.solved_cells.discard(rc)
         else:
             self.notes[rc] = []
-        self._render_cell_text(rc)
         self._paint_cell(rc)
+        self._render_cell_text(rc)
 
     def _check_win(self):
         if self._is_complete() and self._is_correct():
@@ -466,26 +487,27 @@ class SudokuGUI:
 
     def _current_grid(self):
         grid = [[0] * SIZE for _ in range(SIZE)]
-        for (r, c) in self.cells:
+        for (r, c) in self.all_cells:
             grid[r][c] = self.values.get((r, c), 0)
         return grid
 
     def _is_complete(self):
-        return all(self.values.get(rc, 0) != 0 for rc in self.cells)
+        return all(self.values.get(rc, 0) != 0 for rc in self.all_cells)
 
     def _is_correct(self):
         return self._current_grid() == self.solution
 
     def check(self):
         wrong = 0
-        for rc in self.cells:
+        for rc in self.all_cells:
             if rc in self.given:
                 continue
             val = self.values.get(rc, 0)
             if val != 0 and val != self.solution[rc[0]][rc[1]]:
-                err = self.settings["error_bg"]
-                self.cells[rc].config(readonlybackground=err,
-                                      fg=_contrast_text(err))
+                if rc in self.cell_rect:
+                    self.canvas.itemconfig(self.cell_rect[rc],
+                                           fill=self.settings["error_bg"])
+                    self._render_cell_text(rc)
                 wrong += 1
         if wrong == 0:
             self.status.configure(
@@ -495,15 +517,15 @@ class SudokuGUI:
             self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
-        for (r, c) in self.cells:
-            if (r, c) in self.given:
+        for (r, c) in self.all_cells:
+            rc = (r, c)
+            if rc in self.given:
                 continue
-            self.values[(r, c)] = self.solution[r][c]
-            self.notes[(r, c)] = []
-            self._render_cell_text((r, c))
-            self.cells[(r, c)].config(
-                readonlybackground=_resolve(CELL_BG, self._mode()),
-                fg=_resolve(SOLVED_FG, self._mode()))
+            self.values[rc] = self.solution[r][c]
+            self.notes[rc] = []
+            self.solved_cells.add(rc)
+            self._paint_cell(rc)
+            self._render_cell_text(rc)
         self.status.configure(text="Solution revealed.")
 
 
