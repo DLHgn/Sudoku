@@ -173,7 +173,8 @@ class SudokuGUI:
                 e = tk.Entry(self.canvas, width=2,
                              font=("Helvetica", 20, "bold"),
                              justify="center", bd=0, relief="flat",
-                             highlightthickness=0)
+                             highlightthickness=0,
+                             validate="key", validatecommand=vcmd)
                 e.bind("<FocusIn>", lambda ev, rc=(r, c): self._on_focus(rc))
                 e.bind("<KeyRelease>", lambda ev, rc=(r, c): self._on_type(rc))
                 self.cells[(r, c)] = e
