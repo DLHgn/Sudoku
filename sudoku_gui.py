@@ -30,10 +30,17 @@ import sudoku
 SIZE = 9
 BOX = 3
 
-# Difficulty hook: label -> cells removed. No selector is exposed yet (by
-# request); wiring one later just means passing a choice to new_game().
-DIFFICULTIES = {"Easy": 40, "Medium": 50, "Hard": 56}
-DEFAULT_DIFFICULTY = "Medium"
+# Difficulty: label -> number of cells to attempt to remove (more removed =
+# fewer starting clues = harder). The generator's uniqueness check may keep a
+# few more clues than requested, so these are targets, not exact clue counts.
+DIFFICULTIES = {
+    "Beginner": 36,
+    "Easy": 44,
+    "Intermediate": 50,
+    "Expert": 58,
+}
+DIFFICULTY_ORDER = ["Beginner", "Easy", "Intermediate", "Expert"]
+DEFAULT_DIFFICULTY = "Easy"
 
 # Digit colors. These are tuples (light_mode, dark_mode) so they stay legible
 # in either appearance; CustomTkinter picks the right one automatically.
@@ -57,6 +64,7 @@ DEFAULT_SETTINGS = {
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
     "notes_clear": True,        # entering a big number clears that cell's notes
+    "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
 }
 
 APPEARANCES = ["System", "Light", "Dark"]
@@ -99,6 +107,8 @@ def load_settings():
                 if k in ("cell_line", "box_line"):
                     val = max(LINE_MIN, min(LINE_MAX, int(val)))
                 if k == "appearance" and val not in APPEARANCES:
+                    continue
+                if k == "difficulty" and val not in DIFFICULTIES:
                     continue
                 settings[k] = val
     except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
@@ -167,7 +177,7 @@ class SudokuGUI:
         self._build_grid()
         self._build_controls()
         self._apply_settings()
-        self.new_game(DEFAULT_DIFFICULTY)
+        self.new_game(self.settings["difficulty"])
 
     # ---- UI construction -------------------------------------------------
 
@@ -308,11 +318,21 @@ class SudokuGUI:
         self._render_cell_text(rc)
 
     def _build_controls(self):
+        # Difficulty selector on its own row above the action buttons.
+        diff_row = ctk.CTkFrame(self.root, fg_color="transparent")
+        diff_row.grid(row=1, column=0, pady=(0, 6))
+        ctk.CTkLabel(diff_row, text="Difficulty:").grid(row=0, column=0, padx=(0, 6))
+        self.difficulty_menu = ctk.CTkOptionMenu(
+            diff_row, values=DIFFICULTY_ORDER, width=140,
+            command=self._on_difficulty_change)
+        self.difficulty_menu.set(self.settings["difficulty"])
+        self.difficulty_menu.grid(row=0, column=1)
+
         self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.bar.grid(row=1, column=0, pady=(0, 8))
+        self.bar.grid(row=2, column=0, pady=(0, 8))
 
         ctk.CTkButton(self.bar, text="New Game", width=84,
-                      command=lambda: self.new_game(DEFAULT_DIFFICULTY)
+                      command=self._new_game_clicked
                       ).grid(row=0, column=0, padx=4)
         self.notes_btn = ctk.CTkButton(self.bar, text="Notes: OFF", width=84,
                                        command=self.toggle_notes_mode)
@@ -325,7 +345,18 @@ class SudokuGUI:
                       command=self.open_settings).grid(row=0, column=4, padx=4)
 
         self.status = ctk.CTkLabel(self.root, text="")
-        self.status.grid(row=2, column=0, pady=(0, 12))
+        self.status.grid(row=3, column=0, pady=(0, 12))
+
+    def _new_game_clicked(self):
+        self.new_game(self.settings["difficulty"])
+
+    def _on_difficulty_change(self, value):
+        # Remember the choice (persisted) but don't disrupt the current puzzle;
+        # it takes effect on the next New Game.
+        self.settings["difficulty"] = value
+        save_settings(self.settings)
+        self.status.configure(
+            text=f"Difficulty set to {value}. Starts on next New Game.")
 
     # ---- settings --------------------------------------------------------
 
