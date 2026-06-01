@@ -128,16 +128,19 @@ _TIER_REMOVAL = {
 }
 
 
-def make_rated_puzzle(tier, max_attempts=400, rater=None):
+def make_rated_puzzle(tier, max_attempts=120, rater=None, cache=None):
     """Generate a uniquely-solvable puzzle whose human-solving difficulty
-    matches `tier`, as judged by the rater (solver.rate).
+    matches `tier`. Returns (puzzle, solution, actual_tier, source) where source
+    is "fresh" (generated this call), "cache" (served from the cache), or
+    "fallback" (closest tier generated when nothing matched).
 
-    Generation is candidate-and-test: make a puzzle, rate it, keep it if it
-    matches the requested tier. Returns (puzzle, solution, actual_tier). If no
-    exact match is found within max_attempts, returns the closest one generated
-    so the caller always gets a playable puzzle.
+    If a `cache` (puzzle_cache.PuzzleCache) is given:
+      - every rated candidate is banked under its actual tier (free variety,
+        especially for the rare middle tiers), and
+      - when live generation can't hit the target within max_attempts, a cached
+        puzzle of the target tier is served instead of a wrong-tier fallback.
 
-    rater: callable(grid) -> (tier_name, level, log). Injected to avoid a hard
+    rater: callable(grid) -> (tier_name, level, log). Injected to avoid an
     import cycle; callers pass solver.rate.
     """
     if rater is None:
@@ -145,22 +148,39 @@ def make_rated_puzzle(tier, max_attempts=400, rater=None):
         rater = solver.rate
 
     target_removed = _TIER_REMOVAL.get(tier, 50)
-    # Track the closest fallback by tier distance, in case we never hit exact.
     order = ["Beginner", "Easy", "Intermediate", "Expert"]
     target_idx = order.index(tier) if tier in order else 1
     best = None  # (distance, puzzle, solution, actual_tier)
 
     for _ in range(max_attempts):
         puzzle, solution = make_puzzle(clues_removed=target_removed)
-        actual, level, _log = rater(puzzle)
+        actual, _level, _log = rater(puzzle)
+        if cache is not None:
+            cache.add(actual, puzzle, solution)   # bank as we go (your idea)
         if actual == tier:
-            return puzzle, solution, actual
-        # Remember the nearest-tier candidate as a fallback.
+            return puzzle, solution, actual, "fresh"
         dist = abs(order.index(actual) - target_idx) if actual in order else 9
         if best is None or dist < best[0]:
             best = (dist, puzzle, solution, actual)
 
-    return best[1], best[2], best[3]
+    # Live generation missed the target. Prefer a cached puzzle of the right
+    # tier over serving the wrong difficulty.
+    if cache is not None:
+        cached = cache.take(tier)
+        if cached is not None:
+            return cached[0], cached[1], tier, "cache"
+
+    # Last resort: if we somehow have no candidate at all (e.g. zero attempts
+    # and an empty cache), generate one plain puzzle so the caller always gets
+    # a playable board.
+    if best is None:
+        puzzle, solution = make_puzzle(clues_removed=target_removed)
+        actual, _level, _log = rater(puzzle)
+        if cache is not None:
+            cache.add(actual, puzzle, solution)
+        return puzzle, solution, actual, "fallback"
+
+    return best[1], best[2], best[3], "fallback"
 
 
 def format_grid(grid):

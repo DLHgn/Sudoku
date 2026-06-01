@@ -28,6 +28,7 @@ except ImportError:
 
 import sudoku
 import solver
+import puzzle_cache
 
 SIZE = 9
 BOX = 3
@@ -177,6 +178,7 @@ class SudokuGUI:
         self.notes_mode = False  # when True, typed digits toggle notes
         self._generating = False
         self._gen_result = None
+        self.cache = puzzle_cache.PuzzleCache()  # rolling per-tier puzzle store
 
         self._build_grid()
         self._build_controls()
@@ -404,9 +406,10 @@ class SudokuGUI:
         self.difficulty_menu.configure(state="disabled")
 
         def work():
-            puzzle, solution, actual = sudoku.make_rated_puzzle(
-                difficulty, rater=solver.rate)
-            self._gen_result = (puzzle, solution, difficulty, actual)
+            puzzle, solution, actual, source = sudoku.make_rated_puzzle(
+                difficulty, rater=solver.rate, cache=self.cache)
+            self.cache.save()           # persist any newly banked puzzles
+            self._gen_result = (puzzle, solution, difficulty, actual, source)
 
         threading.Thread(target=work, daemon=True).start()
         self._poll_generation()
@@ -416,18 +419,21 @@ class SudokuGUI:
         if self._gen_result is None:
             self.root.after(50, self._poll_generation)
             return
-        puzzle, solution, requested, actual = self._gen_result
+        puzzle, solution, requested, actual, source = self._gen_result
         self._gen_result = None
         self.puzzle, self.solution = puzzle, solution
         self.selected = None
         self._render_puzzle()
         self._generating = False
         self.difficulty_menu.configure(state="normal")
-        if actual == requested:
+        if source == "fresh":
             self.status.configure(text=f"New game ({requested}). Good luck!")
-        else:
-            # Couldn't hit the exact tier within the attempt budget; we used the
-            # closest. Be honest rather than mislabel the puzzle.
+        elif source == "cache":
+            # Served a saved puzzle of the right tier; let the player regenerate.
+            self.status.configure(
+                text=f"New game ({requested}, saved puzzle). "
+                     f"Tap New Game to try for a fresh one.")
+        else:  # fallback
             self.status.configure(
                 text=f"New game (closest to {requested}: {actual}). Good luck!")
 
