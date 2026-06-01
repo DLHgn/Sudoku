@@ -18,6 +18,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 from tkinter import colorchooser, messagebox
+from tkinter import font as tkfont
 
 try:
     import darkdetect  # ships with CustomTkinter; reads the OS theme directly
@@ -187,7 +188,11 @@ class SudokuGUI:
                              highlightthickness=0, state="readonly",
                              readonlybackground="#ffffff")
                 e.bind("<FocusIn>", lambda ev, rc=(r, c): self._on_focus(rc))
-                e.bind("<Key>", lambda ev, rc=(r, c): self._on_key(ev, rc))
+                # Bind Shift-digit explicitly so Tk itself detects the modifier
+                # (cross-platform), rather than us decoding a raw state bitmask
+                # whose value differs between macOS/Windows/Linux.
+                e.bind("<Key>", lambda ev, rc=(r, c): self._on_key(ev, rc, False))
+                e.bind("<Shift-Key>", lambda ev, rc=(r, c): self._on_key(ev, rc, True))
                 self.cells[(r, c)] = e
 
         self._layout_grid()
@@ -231,12 +236,26 @@ class SudokuGUI:
                 self._render_cell_text((r, c))
                 self._paint_cell((r, c))
 
-    NOTE_FONT = ("Helvetica", 10)
     BIG_FONT = ("Helvetica", 20, "bold")
+    # A thin space between notes keeps the digits visually distinct ("1 3 9",
+    # not "139") while using less width than a normal space, so even all nine
+    # candidates fit inside a cell.
+    NOTE_SEP = "\u2009"
+
+    def _note_font(self, text):
+        """Pick the largest notes font size at which `text` actually fits inside
+        the cell, measured rather than guessed. Correct for any note count, cell
+        size, or platform font metrics."""
+        usable = CELL_PX - 4          # small margin so text never touches edges
+        for size in range(12, 3, -1):  # try 12pt down to a 4pt floor
+            f = tkfont.Font(family="Helvetica", size=size)
+            if f.measure(text) <= usable:
+                return ("Helvetica", size)
+        return ("Helvetica", 4)        # floor: smallest we'll go
 
     def _render_cell_text(self, rc):
         """Write the cell's display text + font from the model (big value or
-        space-separated notes)."""
+        notes string)."""
         e = self.cells[rc]
         val = self.values.get(rc, 0)
         notes = self.notes.get(rc, [])
@@ -246,8 +265,9 @@ class SudokuGUI:
             e.insert(0, str(val))
             e.config(font=self.BIG_FONT)
         elif notes:
-            e.insert(0, " ".join(str(n) for n in notes))
-            e.config(font=self.NOTE_FONT)
+            text = self.NOTE_SEP.join(str(n) for n in notes)
+            e.insert(0, text)
+            e.config(font=self._note_font(text))
         else:
             e.config(font=self.BIG_FONT)
         e.config(state="readonly")
@@ -364,28 +384,38 @@ class SudokuGUI:
             self._paint_cell(prev)   # repaint (and possibly flag) the cell we left
         self._paint_cell(rc)         # highlight the newly selected cell
 
-    def _on_key(self, event, rc):
-        """Handle a keystroke on a cell. Returns 'break' to suppress the Entry's
-        own default handling (cells are display-only; we own all edits)."""
+    # Some keyboard layouts report Shift+digit as the symbol keysym rather than
+    # the digit. Map those back so Shift-noting works regardless of layout.
+    _SHIFT_DIGIT = {
+        "exclam": 1, "at": 2, "numbersign": 3, "dollar": 4, "percent": 5,
+        "asciicircum": 6, "ampersand": 7, "asterisk": 8, "parenleft": 9,
+    }
+
+    def _on_key(self, event, rc, shift):
+        """Handle a keystroke on a cell. `shift` is True when this came from the
+        <Shift-Key> binding. Returns 'break' to suppress the Entry's own default
+        handling (cells are display-only; we own all edits)."""
         if rc in self.given:
             return "break"          # can't edit clue cells
         key = event.keysym
-        char = event.char
-        # Shift+digit => notes; plain digit => value. The Notes toggle flips
-        # the default so a plain digit becomes a note without holding Shift.
-        shift = bool(event.state & 0x0001)
-        if len(char) == 1 and char in "123456789":
-            d = int(char)
+        # Resolve the digit: prefer a plain digit keysym; otherwise translate a
+        # shifted-symbol keysym (layout-dependent) back to its digit.
+        d = None
+        if key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+            d = int(key)
+        elif key in self._SHIFT_DIGIT:
+            d = self._SHIFT_DIGIT[key]
+        if d is not None:
             note_intent = self.notes_mode ^ shift   # toggle XOR Shift
             if note_intent:
                 self._toggle_note(rc, d)
             else:
                 self._set_value(rc, d)
             return "break"
-        if key in ("BackSpace", "Delete", "0"):
+        if key in ("BackSpace", "Delete", "0", "KP_0"):
             self._clear_cell(rc)
             return "break"
-        if char == " ":             # space also clears, harmless
+        if key == "space":
             self._clear_cell(rc)
             return "break"
         return "break"              # ignore everything else (letters, etc.)
