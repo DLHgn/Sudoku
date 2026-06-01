@@ -39,6 +39,7 @@ DEFAULT_DIFFICULTY = "Medium"
 GIVEN_FG = ("#1a1a1a", "#f0f0f0")   # original clues (locked)
 USER_FG = ("#1565c0", "#5fa8ff")    # player-entered values
 SOLVED_FG = ("#2e7d32", "#5fd36a")  # auto-solve fills
+NOTE_FG = ("#888888", "#aaaaaa")    # pencil-mark notes (dimmer than values)
 
 # Cell backgrounds (tuples for light/dark). Cells are plain tk widgets on the
 # canvas, so these are resolved to a single color at render time.
@@ -54,6 +55,7 @@ DEFAULT_SETTINGS = {
     "cell_line": 1,             # px, lines between cells
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
+    "notes_clear": True,        # entering a big number clears that cell's notes
 }
 
 APPEARANCES = ["System", "Light", "Dark"]
@@ -153,8 +155,12 @@ class SudokuGUI:
 
         self.puzzle = None
         self.solution = None
-        self.cells = {}
+        self.cells = {}          # (r, c) -> Entry display widget
+        self.values = {}         # (r, c) -> int 0..9 (0 = no big value)
+        self.notes = {}          # (r, c) -> list[int] of candidate notes
+        self.given = set()       # (r, c) of locked clue cells
         self.selected = None
+        self.notes_mode = False  # when True, typed digits toggle notes
 
         self._build_grid()
         self._build_controls()
@@ -169,18 +175,19 @@ class SudokuGUI:
         self.canvas = ctk.CTkCanvas(self.root, highlightthickness=0, bd=0)
         self.canvas.grid(row=0, column=0, padx=16, pady=16)
 
-        vcmd = (self.root.register(self._validate_entry), "%P")
         for r in range(SIZE):
             for c in range(SIZE):
-                # Plain tk.Entry: it sits on the canvas and we fully control its
-                # look, so it themes consistently regardless of platform.
+                # The Entry is display-only: we manage its text ourselves from
+                # the value/notes model, so it can show either one big digit or
+                # a small space-separated notes string. readonly blocks direct
+                # editing; all input flows through _on_key.
                 e = tk.Entry(self.canvas, width=2,
                              font=("Helvetica", 20, "bold"),
                              justify="center", bd=0, relief="flat",
-                             highlightthickness=0,
-                             validate="key", validatecommand=vcmd)
+                             highlightthickness=0, state="readonly",
+                             readonlybackground="#ffffff")
                 e.bind("<FocusIn>", lambda ev, rc=(r, c): self._on_focus(rc))
-                e.bind("<KeyRelease>", lambda ev, rc=(r, c): self._on_type(rc))
+                e.bind("<Key>", lambda ev, rc=(r, c): self._on_key(ev, rc))
                 self.cells[(r, c)] = e
 
         self._layout_grid()
@@ -221,43 +228,75 @@ class SudokuGUI:
                 y = offsets[r] + line_at(r)
                 e = self.cells[(r, c)]
                 e.place(x=x, y=y, width=CELL_PX, height=CELL_PX)
-                e.config(disabledbackground=cell_bg,
-                         disabledforeground=_resolve(GIVEN_FG, mode))
+                self._render_cell_text((r, c))
                 self._paint_cell((r, c))
 
+    NOTE_FONT = ("Helvetica", 10)
+    BIG_FONT = ("Helvetica", 20, "bold")
+
+    def _render_cell_text(self, rc):
+        """Write the cell's display text + font from the model (big value or
+        space-separated notes)."""
+        e = self.cells[rc]
+        val = self.values.get(rc, 0)
+        notes = self.notes.get(rc, [])
+        e.config(state="normal")
+        e.delete(0, tk.END)
+        if val != 0:
+            e.insert(0, str(val))
+            e.config(font=self.BIG_FONT)
+        elif notes:
+            e.insert(0, " ".join(str(n) for n in notes))
+            e.config(font=self.NOTE_FONT)
+        else:
+            e.config(font=self.BIG_FONT)
+        e.config(state="readonly")
+
     def _paint_cell(self, rc):
-        """Set a cell's background/foreground to match its current state:
-        selected -> highlight, wrong (when auto-check on) -> error, else normal.
-        Disabled (given) cells are left to their disabled colors."""
+        """Set a cell's colors from its current state: given -> fixed clue look,
+        selected -> highlight, wrong big value (auto-check) -> error, else normal.
+        Notes are never flagged as wrong."""
         cell = self.cells[rc]
-        if cell["state"] == "disabled":
-            return
         mode = self._mode()
+        if rc in self.given:
+            cell.config(readonlybackground=_resolve(CELL_BG, mode),
+                        fg=_resolve(GIVEN_FG, mode))
+            return
         if rc == self.selected:
             hl = self.settings["highlight_bg"]
-            cell.config(bg=hl, fg=_contrast_text(hl))
+            cell.config(readonlybackground=hl, fg=_contrast_text(hl))
             return
-        v = cell.get()
-        wrong = (self.settings["auto_check"] and v.isdigit()
+        val = self.values.get(rc, 0)
+        wrong = (self.settings["auto_check"] and val != 0
                  and self.solution is not None
-                 and int(v) != self.solution[rc[0]][rc[1]])
+                 and val != self.solution[rc[0]][rc[1]])
         if wrong:
             err = self.settings["error_bg"]
-            cell.config(bg=err, fg=_contrast_text(err))
+            cell.config(readonlybackground=err, fg=_contrast_text(err))
+        elif self.values.get(rc, 0) == 0 and self.notes.get(rc):
+            # Notes use a dimmer foreground so they read as provisional.
+            cell.config(readonlybackground=_resolve(CELL_BG, mode),
+                        fg=_resolve(NOTE_FG, mode))
         else:
-            cell.config(bg=_resolve(CELL_BG, mode), fg=_resolve(USER_FG, mode))
+            cell.config(readonlybackground=_resolve(CELL_BG, mode),
+                        fg=_resolve(USER_FG, mode))
 
     def _build_controls(self):
         self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
         self.bar.grid(row=1, column=0, pady=(0, 8))
 
-        specs = [("New Game", lambda: self.new_game(DEFAULT_DIFFICULTY)),
-                 ("Check", self.check),
-                 ("Solve", self.solve),
-                 ("Settings", self.open_settings)]
-        for col, (text, cmd) in enumerate(specs):
-            ctk.CTkButton(self.bar, text=text, width=90, command=cmd
-                          ).grid(row=0, column=col, padx=5)
+        ctk.CTkButton(self.bar, text="New Game", width=84,
+                      command=lambda: self.new_game(DEFAULT_DIFFICULTY)
+                      ).grid(row=0, column=0, padx=4)
+        self.notes_btn = ctk.CTkButton(self.bar, text="Notes: OFF", width=84,
+                                       command=self.toggle_notes_mode)
+        self.notes_btn.grid(row=0, column=1, padx=4)
+        ctk.CTkButton(self.bar, text="Check", width=84, command=self.check
+                      ).grid(row=0, column=2, padx=4)
+        ctk.CTkButton(self.bar, text="Solve", width=84, command=self.solve
+                      ).grid(row=0, column=3, padx=4)
+        ctk.CTkButton(self.bar, text="Settings", width=84,
+                      command=self.open_settings).grid(row=0, column=4, padx=4)
 
         self.status = ctk.CTkLabel(self.root, text="")
         self.status.grid(row=2, column=0, pady=(0, 12))
@@ -272,8 +311,6 @@ class SudokuGUI:
     def _apply_settings(self):
         ctk.set_appearance_mode(self.settings["appearance"])
         self._layout_grid()
-        if self.selected and self.cells[self.selected]["state"] != "disabled":
-            self.cells[self.selected].config(bg=self.settings["highlight_bg"])
 
     def open_settings(self):
         SettingsDialog(self.root, self.settings,
@@ -291,12 +328,6 @@ class SudokuGUI:
         self.status.configure(
             text="Settings saved." if ok else "Applied (couldn't write file).")
 
-    # ---- input validation ------------------------------------------------
-
-    @staticmethod
-    def _validate_entry(proposed):
-        return proposed == "" or (len(proposed) == 1 and proposed in "123456789")
-
     # ---- game lifecycle --------------------------------------------------
 
     def new_game(self, difficulty):
@@ -309,16 +340,20 @@ class SudokuGUI:
         self.status.configure(text=f"New game ({difficulty}). Good luck!")
 
     def _render_puzzle(self):
-        mode = self._mode()
-        cell_bg = _resolve(CELL_BG, mode)
-        for (r, c), e in self.cells.items():
-            e.config(state="normal")
-            e.delete(0, tk.END)
-            e.config(bg=cell_bg, fg=_resolve(USER_FG, mode))
-            val = self.puzzle[r][c]
-            if val != 0:
-                e.insert(0, str(val))
-                e.config(state="disabled")
+        """Reset the model from the freshly generated puzzle and redraw."""
+        self.values = {}
+        self.notes = {}
+        self.given = set()
+        for r in range(SIZE):
+            for c in range(SIZE):
+                v = self.puzzle[r][c]
+                self.values[(r, c)] = v
+                self.notes[(r, c)] = []
+                if v != 0:
+                    self.given.add((r, c))
+        for rc in self.cells:
+            self._render_cell_text(rc)
+            self._paint_cell(rc)
 
     # ---- interaction -----------------------------------------------------
 
@@ -329,42 +364,98 @@ class SudokuGUI:
             self._paint_cell(prev)   # repaint (and possibly flag) the cell we left
         self._paint_cell(rc)         # highlight the newly selected cell
 
-    def _on_type(self, rc):
-        cell = self.cells[rc]
-        if cell["state"] != "disabled":
-            # While actively editing, keep the highlight look (no mid-typing
-            # judgement); the wrong-flag happens on leave via _paint_cell.
-            hl = self.settings["highlight_bg"]
-            cell.config(bg=hl, fg=_contrast_text(hl))
+    def _on_key(self, event, rc):
+        """Handle a keystroke on a cell. Returns 'break' to suppress the Entry's
+        own default handling (cells are display-only; we own all edits)."""
+        if rc in self.given:
+            return "break"          # can't edit clue cells
+        key = event.keysym
+        char = event.char
+        # Shift+digit => notes; plain digit => value. The Notes toggle flips
+        # the default so a plain digit becomes a note without holding Shift.
+        shift = bool(event.state & 0x0001)
+        if len(char) == 1 and char in "123456789":
+            d = int(char)
+            note_intent = self.notes_mode ^ shift   # toggle XOR Shift
+            if note_intent:
+                self._toggle_note(rc, d)
+            else:
+                self._set_value(rc, d)
+            return "break"
+        if key in ("BackSpace", "Delete", "0"):
+            self._clear_cell(rc)
+            return "break"
+        if char == " ":             # space also clears, harmless
+            self._clear_cell(rc)
+            return "break"
+        return "break"              # ignore everything else (letters, etc.)
+
+    def _set_value(self, rc, d):
+        self.values[rc] = d
+        if self.settings["notes_clear"]:
+            self.notes[rc] = []     # entering a real number clears notes (setting)
+        self._render_cell_text(rc)
+        self._paint_cell(rc)
+        self._check_win()
+
+    def _toggle_note(self, rc, d):
+        if self.values.get(rc, 0) != 0:
+            return                  # a cell with a big value holds no notes
+        notes = self.notes.setdefault(rc, [])
+        if d in notes:
+            notes.remove(d)         # typing an existing note removes it
+        else:
+            notes.append(d)         # kept in entry order (left-to-right)
+        self._render_cell_text(rc)
+        self._paint_cell(rc)
+
+    def _clear_cell(self, rc):
+        # Staged clear: if a big value is present, remove just the value (which
+        # reveals any preserved notes); otherwise clear the notes.
+        if self.values.get(rc, 0) != 0:
+            self.values[rc] = 0
+        else:
+            self.notes[rc] = []
+        self._render_cell_text(rc)
+        self._paint_cell(rc)
+
+    def _check_win(self):
         if self._is_complete() and self._is_correct():
             self.status.configure(text="Solved! Well done.")
             messagebox.showinfo("Sudoku", "You solved it!")
+
+    def toggle_notes_mode(self):
+        self.notes_mode = not self.notes_mode
+        self.notes_btn.configure(
+            text="Notes: ON" if self.notes_mode else "Notes: OFF")
+        self.status.configure(
+            text="Notes mode on — digits add pencil marks."
+            if self.notes_mode else "Notes mode off.")
 
     # ---- actions ---------------------------------------------------------
 
     def _current_grid(self):
         grid = [[0] * SIZE for _ in range(SIZE)]
-        for (r, c), e in self.cells.items():
-            v = e.get()
-            grid[r][c] = int(v) if v.isdigit() else 0
+        for (r, c) in self.cells:
+            grid[r][c] = self.values.get((r, c), 0)
         return grid
 
     def _is_complete(self):
-        return all(e.get().isdigit() for e in self.cells.values())
+        return all(self.values.get(rc, 0) != 0 for rc in self.cells)
 
     def _is_correct(self):
         return self._current_grid() == self.solution
 
     def check(self):
         wrong = 0
-        err_bg = self.settings["error_bg"]
-        err_fg = _contrast_text(err_bg)
-        for (r, c), e in self.cells.items():
-            if e["state"] == "disabled":
+        for rc in self.cells:
+            if rc in self.given:
                 continue
-            v = e.get()
-            if v.isdigit() and int(v) != self.solution[r][c]:
-                e.config(bg=err_bg, fg=err_fg)
+            val = self.values.get(rc, 0)
+            if val != 0 and val != self.solution[rc[0]][rc[1]]:
+                err = self.settings["error_bg"]
+                self.cells[rc].config(readonlybackground=err,
+                                      fg=_contrast_text(err))
                 wrong += 1
         if wrong == 0:
             self.status.configure(
@@ -374,14 +465,15 @@ class SudokuGUI:
             self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
-        mode = self._mode()
-        cell_bg = _resolve(CELL_BG, mode)
-        for (r, c), e in self.cells.items():
-            if e["state"] == "disabled":
+        for (r, c) in self.cells:
+            if (r, c) in self.given:
                 continue
-            e.delete(0, tk.END)
-            e.insert(0, str(self.solution[r][c]))
-            e.config(bg=cell_bg, fg=_resolve(SOLVED_FG, mode))
+            self.values[(r, c)] = self.solution[r][c]
+            self.notes[(r, c)] = []
+            self._render_cell_text((r, c))
+            self.cells[(r, c)].config(
+                readonlybackground=_resolve(CELL_BG, self._mode()),
+                fg=_resolve(SOLVED_FG, self._mode()))
         self.status.configure(text="Solution revealed.")
 
 
@@ -451,6 +543,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.autocheck_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
+        # Notes-clear toggle
+        ctk.CTkLabel(self, text="Number clears notes").grid(
+            row=row, column=0, sticky="w", **pad)
+        self.notesclear_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_notesclear)
+        if self.draft["notes_clear"]:
+            self.notesclear_switch.select()
+        else:
+            self.notesclear_switch.deselect()
+        self.notesclear_switch.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
         ctk.CTkButton(btns, text="Restore Defaults", width=120,
@@ -487,6 +591,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["auto_check"] = bool(self.autocheck_switch.get())
         self._preview()
 
+    def _toggle_notesclear(self):
+        self.draft["notes_clear"] = bool(self.notesclear_switch.get())
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
@@ -505,10 +613,11 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["appearance"] = DEFAULT_SETTINGS["appearance"]
         self.appearance_menu.set(self.draft["appearance"])
         self.draft["auto_check"] = DEFAULT_SETTINGS["auto_check"]
-        if self.draft["auto_check"]:
-            self.autocheck_switch.select()
-        else:
-            self.autocheck_switch.deselect()
+        (self.autocheck_switch.select if self.draft["auto_check"]
+         else self.autocheck_switch.deselect)()
+        self.draft["notes_clear"] = DEFAULT_SETTINGS["notes_clear"]
+        (self.notesclear_switch.select if self.draft["notes_clear"]
+         else self.notesclear_switch.deselect)()
         self._preview()
 
     def _cancel(self):
