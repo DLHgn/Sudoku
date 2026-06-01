@@ -1,77 +1,124 @@
-"""Tkinter GUI for the Sudoku generator/solver.
+"""CustomTkinter GUI for the Sudoku generator/solver.
 
-Requires sudoku.py in the same directory. Run: python sudoku_gui.py
+Requires sudoku.py in the same directory, plus the CustomTkinter package:
+    pip install customtkinter
+Run: python sudoku_gui.py
 
 Modes:
   - Play:  fill in cells yourself; "Check" flags mistakes, "Solve" reveals all.
   - New:   generates a fresh puzzle (difficulty hook is ready, see DIFFICULTIES).
 
-Settings (background / highlight / error colors) are editable via the Settings
-button and persist to a JSON file next to this script.
+Settings (theme, colors, line widths) are editable via the Settings button and
+persist to a JSON file next to this script.
 """
 
 import json
 import os
 import tkinter as tk
-from tkinter import messagebox, colorchooser
+
+import customtkinter as ctk
+from tkinter import colorchooser, messagebox
+
+try:
+    import darkdetect  # ships with CustomTkinter; reads the OS theme directly
+except ImportError:
+    darkdetect = None
 
 import sudoku
 
 SIZE = 9
 BOX = 3
 
-# Difficulty hook: maps a label to how many cells to remove. No selector is
-# exposed yet (by request); wiring one later is just binding a control to these
-# values and passing the choice to new_game(). DEFAULT picks the starting level.
-DIFFICULTIES = {
-    "Easy": 40,
-    "Medium": 50,
-    "Hard": 56,
-}
+# Difficulty hook: label -> cells removed. No selector is exposed yet (by
+# request); wiring one later just means passing a choice to new_game().
+DIFFICULTIES = {"Easy": 40, "Medium": 50, "Hard": 56}
 DEFAULT_DIFFICULTY = "Medium"
 
-# Fixed colors (not user-configurable, by request)
-GIVEN_FG = "#1a1a1a"       # original clues (locked)
-USER_FG = "#1565c0"        # player-entered values
-SOLVED_FG = "#2e7d32"      # auto-solve fills
-NORMAL_BG = "#ffffff"      # blank/filled cell background
+# Digit colors. These are tuples (light_mode, dark_mode) so they stay legible
+# in either appearance; CustomTkinter picks the right one automatically.
+GIVEN_FG = ("#1a1a1a", "#f0f0f0")   # original clues (locked)
+USER_FG = ("#1565c0", "#5fa8ff")    # player-entered values
+SOLVED_FG = ("#2e7d32", "#5fd36a")  # auto-solve fills
 
-# User-configurable settings and their defaults. Anything in here is what gets
-# saved to / loaded from the settings file, so adding a new option later is a
-# one-line addition plus a row in the settings dialog.
+# Cell backgrounds (tuples for light/dark). Cells are plain tk widgets on the
+# canvas, so these are resolved to a single color at render time.
+CELL_BG = ("#ffffff", "#2b2b2b")
+
+LINE_COLOR = ("#3a3a3a", "#888888")  # grid lines, per appearance mode
+
+# User-configurable settings + defaults (what gets saved/loaded).
 DEFAULT_SETTINGS = {
-    "window_bg": "#f0f0f0",    # window background (behind board + buttons)
-    "highlight_bg": "#e3f2fd",  # selected cell
-    "error_bg": "#ffcdd2",     # cells flagged wrong by Check
+    "appearance": "System",     # "System" | "Light" | "Dark"
+    "highlight_bg": "#3b6ea5",  # selected cell (single color, both modes)
+    "error_bg": "#c0392b",      # cells flagged wrong by Check
+    "cell_line": 1,             # px, lines between cells
+    "box_line": 3,              # px, the 3x3 box borders
 }
+
+APPEARANCES = ["System", "Light", "Dark"]
+LINE_MIN, LINE_MAX = 1, 8
+CELL_PX = 46
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "sudoku_settings.json")
 
 
 def load_settings():
-    """Load settings from disk, falling back to defaults for any missing keys."""
+    """Load settings, falling back to defaults for any missing/invalid keys."""
     settings = dict(DEFAULT_SETTINGS)
     try:
         with open(SETTINGS_FILE, "r") as f:
             saved = json.load(f)
-        # Only accept known keys with string values; ignore anything unexpected.
-        for k in DEFAULT_SETTINGS:
-            if isinstance(saved.get(k), str):
-                settings[k] = saved[k]
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass  # first run or unreadable file -> defaults
+        for k, default in DEFAULT_SETTINGS.items():
+            val = saved.get(k)
+            if isinstance(val, type(default)) and not isinstance(val, bool):
+                if k in ("cell_line", "box_line"):
+                    val = max(LINE_MIN, min(LINE_MAX, int(val)))
+                if k == "appearance" and val not in APPEARANCES:
+                    continue
+                settings[k] = val
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+        pass
     return settings
 
 
 def save_settings(settings):
-    """Persist settings to disk. Failure is non-fatal (just reported)."""
+    """Persist settings to disk. Failure is non-fatal (reported, not raised)."""
     try:
         with open(SETTINGS_FILE, "w") as f:
             json.dump(settings, f, indent=2)
         return True
     except OSError:
         return False
+
+
+def _effective_mode(appearance):
+    """Map an appearance setting ('System'/'Light'/'Dark') to 'Light' or 'Dark'.
+
+    For 'System' we read the OS theme directly via darkdetect rather than
+    ctk.get_appearance_mode(). CustomTkinter caches its resolved value and
+    updates it on a background poll, so right after toggling modes it can be
+    momentarily stale — reading the OS directly makes every repaint agree."""
+    if appearance == "System":
+        if darkdetect is not None:
+            theme = darkdetect.theme()   # "Dark", "Light", or None
+            if theme in ("Dark", "Light"):
+                return theme
+        # Fallback if darkdetect is unavailable or returns None.
+        return ctk.get_appearance_mode()
+    return appearance
+
+
+def _resolve(color, mode):
+    """Resolve a (light, dark) tuple to one color for the given mode ('Light'
+    or 'Dark'). Single strings pass through unchanged.
+
+    `mode` is passed in explicitly (derived from the app's own setting) rather
+    than read from global state, so the painted colors always match what the
+    app intends to display — even mid-preview or after a cancelled change."""
+    if isinstance(color, (tuple, list)):
+        return color[1] if mode == "Dark" else color[0]
+    return color
 
 
 class SudokuGUI:
@@ -81,10 +128,11 @@ class SudokuGUI:
         self.root.resizable(False, False)
 
         self.settings = load_settings()
+        ctk.set_appearance_mode(self.settings["appearance"])
 
-        self.puzzle = None      # starting grid (0 = blank); clues are locked
-        self.solution = None    # the known full solution
-        self.cells = {}         # (r, c) -> Entry widget
+        self.puzzle = None
+        self.solution = None
+        self.cells = {}
         self.selected = None
 
         self._build_grid()
@@ -95,99 +143,139 @@ class SudokuGUI:
     # ---- UI construction -------------------------------------------------
 
     def _build_grid(self):
-        self.board = tk.Frame(self.root, bg="#1a1a1a", padx=2, pady=2)
-        self.board.grid(row=0, column=0, padx=12, pady=12)
-
-        # Nine 3x3 box frames give us the heavy interior borders for free.
-        boxes = {}
-        for br in range(BOX):
-            for bc in range(BOX):
-                f = tk.Frame(self.board, bg="#1a1a1a", padx=1, pady=1)
-                f.grid(row=br, column=bc, padx=(0, 2 if bc < 2 else 0),
-                       pady=(0, 2 if br < 2 else 0))
-                boxes[(br, bc)] = f
+        # Canvas grid: lines drawn as exact-pixel rectangles, Entry cells placed
+        # on top. Precise widths, DPI-independent.
+        self.canvas = ctk.CTkCanvas(self.root, highlightthickness=0, bd=0)
+        self.canvas.grid(row=0, column=0, padx=16, pady=16)
 
         vcmd = (self.root.register(self._validate_entry), "%P")
         for r in range(SIZE):
             for c in range(SIZE):
-                box = boxes[(r // BOX, c // BOX)]
-                e = tk.Entry(box, width=2, font=("Helvetica", 20, "bold"),
+                # Plain tk.Entry: it sits on the canvas and we fully control its
+                # look, so it themes consistently regardless of platform.
+                e = tk.Entry(self.canvas, width=2,
+                             font=("Helvetica", 20, "bold"),
                              justify="center", bd=0, relief="flat",
-                             disabledbackground=NORMAL_BG,
-                             disabledforeground=GIVEN_FG,
-                             validate="key", validatecommand=vcmd)
-                e.grid(row=r % BOX, column=c % BOX, padx=1, pady=1, ipady=6)
+                             highlightthickness=0)
                 e.bind("<FocusIn>", lambda ev, rc=(r, c): self._on_focus(rc))
                 e.bind("<KeyRelease>", lambda ev, rc=(r, c): self._on_type(rc))
                 self.cells[(r, c)] = e
 
+        self._layout_grid()
+
+    def _layout_grid(self):
+        """(Re)compute geometry from current line widths; draw lines; place cells."""
+        cell_w = int(self.settings["cell_line"])
+        box_w = int(self.settings["box_line"])
+        mode = self._mode()
+        line_color = _resolve(LINE_COLOR, mode)
+        cell_bg = _resolve(CELL_BG, mode)
+
+        def line_at(i):
+            return box_w if (i % BOX == 0) else cell_w
+
+        offsets = [0]
+        for i in range(SIZE):
+            offsets.append(offsets[-1] + line_at(i) + CELL_PX)
+        total = offsets[-1] + box_w
+
+        # Canvas background = line color (the lines are the gaps showing through).
+        self.canvas.config(width=total, height=total, bg=line_color)
+        self.canvas.delete("grid")
+
+        pos = 0
+        for i in range(SIZE + 1):
+            w = line_at(i)
+            self.canvas.create_rectangle(pos, 0, pos + w, total,
+                                         fill=line_color, width=0, tags="grid")
+            self.canvas.create_rectangle(0, pos, total, pos + w,
+                                         fill=line_color, width=0, tags="grid")
+            if i < SIZE:
+                pos += w + CELL_PX
+
+        for r in range(SIZE):
+            for c in range(SIZE):
+                x = offsets[c] + line_at(c)
+                y = offsets[r] + line_at(r)
+                e = self.cells[(r, c)]
+                e.place(x=x, y=y, width=CELL_PX, height=CELL_PX)
+                # Refresh per-mode colors on the entry.
+                e.config(disabledbackground=cell_bg,
+                         disabledforeground=_resolve(GIVEN_FG, mode),
+                         bg=cell_bg, fg=_resolve(USER_FG, mode))
+
     def _build_controls(self):
-        self.bar = tk.Frame(self.root)
-        self.bar.grid(row=1, column=0, pady=(0, 12))
+        self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.bar.grid(row=1, column=0, pady=(0, 8))
 
-        tk.Button(self.bar, text="New Game", width=9,
-                  command=lambda: self.new_game(DEFAULT_DIFFICULTY)
-                  ).grid(row=0, column=0, padx=3)
-        tk.Button(self.bar, text="Check", width=9, command=self.check
-                  ).grid(row=0, column=1, padx=3)
-        tk.Button(self.bar, text="Solve", width=9, command=self.solve
-                  ).grid(row=0, column=2, padx=3)
-        tk.Button(self.bar, text="Settings", width=9, command=self.open_settings
-                  ).grid(row=0, column=3, padx=3)
+        specs = [("New Game", lambda: self.new_game(DEFAULT_DIFFICULTY)),
+                 ("Check", self.check),
+                 ("Solve", self.solve),
+                 ("Settings", self.open_settings)]
+        for col, (text, cmd) in enumerate(specs):
+            ctk.CTkButton(self.bar, text=text, width=90, command=cmd
+                          ).grid(row=0, column=col, padx=5)
 
-        self.status = tk.Label(self.root, text="", font=("Helvetica", 11))
-        self.status.grid(row=2, column=0, pady=(0, 10))
+        self.status = ctk.CTkLabel(self.root, text="")
+        self.status.grid(row=2, column=0, pady=(0, 12))
 
     # ---- settings --------------------------------------------------------
 
+    def _mode(self):
+        """The effective 'Light'/'Dark' mode this app should paint with, based
+        on its own appearance setting (not raw global state)."""
+        return _effective_mode(self.settings["appearance"])
+
     def _apply_settings(self):
-        """Push current settings onto the live widgets."""
-        bg = self.settings["window_bg"]
-        self.root.config(bg=bg)
-        self.bar.config(bg=bg)
-        self.status.config(bg=bg)
-        # Re-highlight the selected cell with the (possibly new) highlight color.
+        ctk.set_appearance_mode(self.settings["appearance"])
+        self._layout_grid()
         if self.selected and self.cells[self.selected]["state"] != "disabled":
             self.cells[self.selected].config(bg=self.settings["highlight_bg"])
 
     def open_settings(self):
-        SettingsDialog(self.root, self.settings, on_save=self._on_settings_saved)
+        SettingsDialog(self.root, self.settings,
+                       on_save=self._on_settings_saved,
+                       on_preview=self._on_settings_preview)
+
+    def _on_settings_preview(self, draft):
+        self.settings.update(draft)
+        self._apply_settings()
 
     def _on_settings_saved(self, new_settings):
         self.settings.update(new_settings)
         ok = save_settings(self.settings)
         self._apply_settings()
-        self.status.config(
-            text="Settings saved." if ok else "Settings applied (couldn't write file).")
+        self.status.configure(
+            text="Settings saved." if ok else "Applied (couldn't write file).")
 
     # ---- input validation ------------------------------------------------
 
     @staticmethod
     def _validate_entry(proposed):
-        # Allow empty or a single digit 1-9; reject everything else (incl. 0).
         return proposed == "" or (len(proposed) == 1 and proposed in "123456789")
 
     # ---- game lifecycle --------------------------------------------------
 
     def new_game(self, difficulty):
         clues_removed = DIFFICULTIES.get(difficulty, 50)
-        self.status.config(text="Generating...")
+        self.status.configure(text="Generating...")
         self.root.update_idletasks()
-
         self.puzzle, self.solution = sudoku.make_puzzle(clues_removed=clues_removed)
         self.selected = None
         self._render_puzzle()
-        self.status.config(text=f"New game ({difficulty}). Good luck!")
+        self.status.configure(text=f"New game ({difficulty}). Good luck!")
 
     def _render_puzzle(self):
+        mode = self._mode()
+        cell_bg = _resolve(CELL_BG, mode)
         for (r, c), e in self.cells.items():
             e.config(state="normal")
             e.delete(0, tk.END)
-            e.config(bg=NORMAL_BG, fg=USER_FG)
+            e.config(bg=cell_bg, fg=_resolve(USER_FG, mode))
             val = self.puzzle[r][c]
             if val != 0:
                 e.insert(0, str(val))
-                e.config(state="disabled")   # lock the given clues
+                e.config(state="disabled")
 
     # ---- interaction -----------------------------------------------------
 
@@ -195,7 +283,7 @@ class SudokuGUI:
         if self.selected and self.selected in self.cells:
             prev = self.cells[self.selected]
             if prev["state"] != "disabled":
-                prev.config(bg=NORMAL_BG)
+                prev.config(bg=_resolve(CELL_BG, self._mode()))
         self.selected = rc
         cell = self.cells[rc]
         if cell["state"] != "disabled":
@@ -204,9 +292,10 @@ class SudokuGUI:
     def _on_type(self, rc):
         cell = self.cells[rc]
         if cell["state"] != "disabled":
-            cell.config(bg=self.settings["highlight_bg"], fg=USER_FG)
+            cell.config(bg=self.settings["highlight_bg"],
+                        fg=_resolve(USER_FG, self._mode()))
         if self._is_complete() and self._is_correct():
-            self.status.config(text="Solved! Well done.")
+            self.status.configure(text="Solved! Well done.")
             messagebox.showinfo("Sudoku", "You solved it!")
 
     # ---- actions ---------------------------------------------------------
@@ -234,62 +323,89 @@ class SudokuGUI:
                 e.config(bg=self.settings["error_bg"])
                 wrong += 1
         if wrong == 0:
-            if self._is_complete():
-                self.status.config(text="All correct — solved!")
-            else:
-                self.status.config(text="No mistakes so far. Keep going.")
+            self.status.configure(
+                text="All correct — solved!" if self._is_complete()
+                else "No mistakes so far. Keep going.")
         else:
-            self.status.config(text=f"{wrong} incorrect cell(s) highlighted.")
+            self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
+        mode = self._mode()
+        cell_bg = _resolve(CELL_BG, mode)
         for (r, c), e in self.cells.items():
             if e["state"] == "disabled":
                 continue
             e.delete(0, tk.END)
             e.insert(0, str(self.solution[r][c]))
-            e.config(bg=NORMAL_BG, fg=SOLVED_FG)
-        self.status.config(text="Solution revealed.")
+            e.config(bg=cell_bg, fg=_resolve(SOLVED_FG, mode))
+        self.status.configure(text="Solution revealed.")
 
 
-class SettingsDialog(tk.Toplevel):
-    """Modal dialog for editing colors. Calls on_save(dict) when saved."""
+class SettingsDialog(ctk.CTkToplevel):
+    """Modal settings dialog. Calls on_preview(dict) live and on_save(dict)."""
 
-    LABELS = [
-        ("window_bg", "Window background"),
-        ("highlight_bg", "Selected cell"),
-        ("error_bg", "Error highlight"),
-    ]
+    COLOR_LABELS = [("highlight_bg", "Selected cell"),
+                    ("error_bg", "Error highlight")]
+    WIDTH_LABELS = [("cell_line", "Cell line width"),
+                    ("box_line", "Box border width")]
 
-    def __init__(self, parent, current, on_save):
+    def __init__(self, parent, current, on_save, on_preview=None):
         super().__init__(parent)
         self.title("Settings")
         self.resizable(False, False)
         self.on_save = on_save
-        self.draft = dict(current)   # edited copy; only committed on Save
+        self.on_preview = on_preview
+        self.draft = dict(current)
+        self._original = dict(current)
         self.swatches = {}
+        self.width_menus = {}
 
-        for i, (key, label) in enumerate(self.LABELS):
-            tk.Label(self, text=label, anchor="w", width=18).grid(
-                row=i, column=0, padx=(14, 6), pady=8, sticky="w")
-            sw = tk.Label(self, width=6, relief="solid", bd=1,
-                          bg=self.draft[key])
-            sw.grid(row=i, column=1, padx=6, pady=8)
+        pad = {"padx": 12, "pady": 8}
+        row = 0
+
+        # Appearance mode
+        ctk.CTkLabel(self, text="Appearance").grid(row=row, column=0, sticky="w", **pad)
+        self.appearance_menu = ctk.CTkOptionMenu(
+            self, values=APPEARANCES, width=120, command=self._set_appearance)
+        self.appearance_menu.set(self.draft["appearance"])
+        self.appearance_menu.grid(row=row, column=1, columnspan=2, sticky="w", **pad)
+        row += 1
+
+        # Color pickers
+        for key, label in self.COLOR_LABELS:
+            ctk.CTkLabel(self, text=label).grid(row=row, column=0, sticky="w", **pad)
+            sw = ctk.CTkButton(self, text="", width=48, height=24,
+                               fg_color=self.draft[key], hover=False,
+                               border_width=1, command=lambda k=key: self._pick(k))
+            sw.grid(row=row, column=1, **pad)
             self.swatches[key] = sw
-            tk.Button(self, text="Choose...",
-                      command=lambda k=key: self._pick(k)
-                      ).grid(row=i, column=2, padx=(6, 14), pady=8)
+            ctk.CTkButton(self, text="Choose...", width=90,
+                          command=lambda k=key: self._pick(k)
+                          ).grid(row=row, column=2, **pad)
+            row += 1
 
-        btns = tk.Frame(self)
-        btns.grid(row=len(self.LABELS), column=0, columnspan=3, pady=(6, 12))
-        tk.Button(btns, text="Restore Defaults", command=self._restore
-                  ).grid(row=0, column=0, padx=5)
-        tk.Button(btns, text="Cancel", command=self.destroy
-                  ).grid(row=0, column=1, padx=5)
-        tk.Button(btns, text="Save", command=self._save
-                  ).grid(row=0, column=2, padx=5)
+        # Line widths (dropdowns 1..8)
+        width_vals = [str(i) for i in range(LINE_MIN, LINE_MAX + 1)]
+        for key, label in self.WIDTH_LABELS:
+            ctk.CTkLabel(self, text=label).grid(row=row, column=0, sticky="w", **pad)
+            m = ctk.CTkOptionMenu(self, values=width_vals, width=80,
+                                  command=lambda v, k=key: self._set_width(k, v))
+            m.set(str(self.draft[key]))
+            m.grid(row=row, column=1, columnspan=2, sticky="w", **pad)
+            self.width_menus[key] = m
+            row += 1
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
+        ctk.CTkButton(btns, text="Restore Defaults", width=120,
+                      command=self._restore).grid(row=0, column=0, padx=5)
+        ctk.CTkButton(btns, text="Cancel", width=90,
+                      command=self._cancel).grid(row=0, column=1, padx=5)
+        ctk.CTkButton(btns, text="Save", width=90,
+                      command=self._save).grid(row=0, column=2, padx=5)
 
         self.transient(parent)
-        self.grab_set()          # modal
+        self.after(10, self.grab_set)  # small delay: CTkToplevel needs to map first
         self.update_idletasks()
         self._center_on(parent)
 
@@ -299,17 +415,41 @@ class SettingsDialog(tk.Toplevel):
         w, h = self.winfo_width(), self.winfo_height()
         self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
 
+    def _preview(self):
+        if self.on_preview:
+            self.on_preview(dict(self.draft))
+
+    def _set_appearance(self, value):
+        self.draft["appearance"] = value
+        self._preview()
+
+    def _set_width(self, key, value):
+        self.draft[key] = int(value)
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
         if chosen and chosen[1]:
             self.draft[key] = chosen[1]
-            self.swatches[key].config(bg=chosen[1])
+            self.swatches[key].configure(fg_color=chosen[1])
+            self._preview()
 
     def _restore(self):
-        for key, _ in self.LABELS:
+        for key, _ in self.COLOR_LABELS:
             self.draft[key] = DEFAULT_SETTINGS[key]
-            self.swatches[key].config(bg=self.draft[key])
+            self.swatches[key].configure(fg_color=self.draft[key])
+        for key, _ in self.WIDTH_LABELS:
+            self.draft[key] = DEFAULT_SETTINGS[key]
+            self.width_menus[key].set(str(self.draft[key]))
+        self.draft["appearance"] = DEFAULT_SETTINGS["appearance"]
+        self.appearance_menu.set(self.draft["appearance"])
+        self._preview()
+
+    def _cancel(self):
+        if self.on_preview:
+            self.on_preview(dict(self._original))
+        self.destroy()
 
     def _save(self):
         self.on_save(self.draft)
@@ -317,7 +457,8 @@ class SettingsDialog(tk.Toplevel):
 
 
 def main():
-    root = tk.Tk()
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk()
     SudokuGUI(root)
     root.mainloop()
 
