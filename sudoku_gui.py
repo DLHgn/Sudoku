@@ -53,6 +53,7 @@ DEFAULT_SETTINGS = {
     "error_bg": "#c0392b",      # cells flagged wrong by Check
     "cell_line": 1,             # px, lines between cells
     "box_line": 3,              # px, the 3x3 box borders
+    "auto_check": True,         # flag wrong entries when leaving a cell
 }
 
 APPEARANCES = ["System", "Light", "Dark"]
@@ -88,7 +89,10 @@ def load_settings():
             saved = json.load(f)
         for k, default in DEFAULT_SETTINGS.items():
             val = saved.get(k)
-            if isinstance(val, type(default)) and not isinstance(val, bool):
+            # Exact type match: `type(...) is type(...)` (not isinstance) so that
+            # a JSON bool can't masquerade as an int and vice versa, since in
+            # Python bool is a subclass of int.
+            if type(val) is type(default):
                 if k in ("cell_line", "box_line"):
                     val = max(LINE_MIN, min(LINE_MAX, int(val)))
                 if k == "appearance" and val not in APPEARANCES:
@@ -217,10 +221,31 @@ class SudokuGUI:
                 y = offsets[r] + line_at(r)
                 e = self.cells[(r, c)]
                 e.place(x=x, y=y, width=CELL_PX, height=CELL_PX)
-                # Refresh per-mode colors on the entry.
                 e.config(disabledbackground=cell_bg,
-                         disabledforeground=_resolve(GIVEN_FG, mode),
-                         bg=cell_bg, fg=_resolve(USER_FG, mode))
+                         disabledforeground=_resolve(GIVEN_FG, mode))
+                self._paint_cell((r, c))
+
+    def _paint_cell(self, rc):
+        """Set a cell's background/foreground to match its current state:
+        selected -> highlight, wrong (when auto-check on) -> error, else normal.
+        Disabled (given) cells are left to their disabled colors."""
+        cell = self.cells[rc]
+        if cell["state"] == "disabled":
+            return
+        mode = self._mode()
+        if rc == self.selected:
+            hl = self.settings["highlight_bg"]
+            cell.config(bg=hl, fg=_contrast_text(hl))
+            return
+        v = cell.get()
+        wrong = (self.settings["auto_check"] and v.isdigit()
+                 and self.solution is not None
+                 and int(v) != self.solution[rc[0]][rc[1]])
+        if wrong:
+            err = self.settings["error_bg"]
+            cell.config(bg=err, fg=_contrast_text(err))
+        else:
+            cell.config(bg=_resolve(CELL_BG, mode), fg=_resolve(USER_FG, mode))
 
     def _build_controls(self):
         self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -298,23 +323,17 @@ class SudokuGUI:
     # ---- interaction -----------------------------------------------------
 
     def _on_focus(self, rc):
-        mode = self._mode()
-        if self.selected and self.selected in self.cells:
-            prev = self.cells[self.selected]
-            if prev["state"] != "disabled":
-                # Restore the vacated cell's normal background and digit color.
-                prev.config(bg=_resolve(CELL_BG, mode), fg=_resolve(USER_FG, mode))
+        prev = self.selected
         self.selected = rc
-        cell = self.cells[rc]
-        if cell["state"] != "disabled":
-            hl = self.settings["highlight_bg"]
-            # Text color is derived from the highlight so it stays readable for
-            # ANY chosen highlight color (white, black, or anything between).
-            cell.config(bg=hl, fg=_contrast_text(hl))
+        if prev and prev in self.cells and prev != rc:
+            self._paint_cell(prev)   # repaint (and possibly flag) the cell we left
+        self._paint_cell(rc)         # highlight the newly selected cell
 
     def _on_type(self, rc):
         cell = self.cells[rc]
         if cell["state"] != "disabled":
+            # While actively editing, keep the highlight look (no mid-typing
+            # judgement); the wrong-flag happens on leave via _paint_cell.
             hl = self.settings["highlight_bg"]
             cell.config(bg=hl, fg=_contrast_text(hl))
         if self._is_complete() and self._is_correct():
@@ -420,6 +439,18 @@ class SettingsDialog(ctk.CTkToplevel):
             self.width_menus[key] = m
             row += 1
 
+        # Auto-check toggle
+        ctk.CTkLabel(self, text="Auto-check entries").grid(
+            row=row, column=0, sticky="w", **pad)
+        self.autocheck_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_autocheck)
+        if self.draft["auto_check"]:
+            self.autocheck_switch.select()
+        else:
+            self.autocheck_switch.deselect()
+        self.autocheck_switch.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
         ctk.CTkButton(btns, text="Restore Defaults", width=120,
@@ -452,6 +483,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft[key] = int(value)
         self._preview()
 
+    def _toggle_autocheck(self):
+        self.draft["auto_check"] = bool(self.autocheck_switch.get())
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
@@ -469,6 +504,11 @@ class SettingsDialog(ctk.CTkToplevel):
             self.width_menus[key].set(str(self.draft[key]))
         self.draft["appearance"] = DEFAULT_SETTINGS["appearance"]
         self.appearance_menu.set(self.draft["appearance"])
+        self.draft["auto_check"] = DEFAULT_SETTINGS["auto_check"]
+        if self.draft["auto_check"]:
+            self.autocheck_switch.select()
+        else:
+            self.autocheck_switch.deselect()
         self._preview()
 
     def _cancel(self):
