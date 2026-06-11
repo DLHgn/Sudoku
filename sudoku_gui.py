@@ -810,6 +810,9 @@ class SudokuGUI:
         self.solved_cells = set(snap["solved"])
         self.selected = snap["selected"]
         self._refresh_board()
+        # Undo/redo can cross the solved boundary (e.g. undoing a Solve): keep
+        # the clock running while the puzzle is unfinished, frozen once it's done.
+        self._sync_timer_to_board()
 
     def _push_undo(self):
         """Record the current state before a mutating action; clears the redo
@@ -910,6 +913,24 @@ class SudokuGUI:
             self._timer_start = None
         self._cancel_timer_job()
         self._update_timer_label()
+
+    def _resume_timer(self):
+        """Continue a frozen clock from its banked time (idempotent). Unlike
+        _start_timer this does NOT reset to zero."""
+        if self._timer_running:
+            return
+        self._timer_start = time.monotonic()
+        self._timer_running = True
+        if self.settings["show_timer"]:
+            self._tick_timer()
+
+    def _sync_timer_to_board(self):
+        """Run the clock iff the puzzle is unfinished. Used after undo/redo so
+        undoing a Solve/win resumes timing and redoing it freezes again."""
+        if self._is_complete() and self._is_correct():
+            self._stop_timer()
+        else:
+            self._resume_timer()
 
     def _apply_timer_visibility(self):
         """Show or hide the clock per the setting; (re)start the tick loop when
