@@ -466,12 +466,15 @@ class SudokuGUI:
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.grid(row=0, column=2, sticky="e")
-        ctk.CTkButton(right, text="Check", width=80, height=34, corner_radius=8,
+        ctk.CTkButton(right, text="Check", width=68, height=34, corner_radius=8,
                       command=self.check, **_ghost_button_kwargs()
                       ).grid(row=0, column=0, padx=(0, 6))
-        ctk.CTkButton(right, text="Solve", width=80, height=34, corner_radius=8,
+        ctk.CTkButton(right, text="Hint", width=68, height=34, corner_radius=8,
+                      command=self.hint, **_ghost_button_kwargs()
+                      ).grid(row=0, column=1, padx=(0, 6))
+        ctk.CTkButton(right, text="Solve", width=68, height=34, corner_radius=8,
                       command=self.solve, **_ghost_button_kwargs()
-                      ).grid(row=0, column=1)
+                      ).grid(row=0, column=2)
 
         self.status = ctk.CTkLabel(self.root, text="",
                                    text_color=("#6a6a6a", "#9a9a9a"))
@@ -742,6 +745,34 @@ class SudokuGUI:
 
     def _is_correct(self):
         return self._current_grid() == self.solution
+
+    def hint(self):
+        """Reveal the correct value for the selected cell (marked as revealed,
+        like a Solve fill). No-op with a status note if there's nothing valid
+        to reveal. Undoable; mirrors `entry_clears_notes` for note tidy-up."""
+        rc = self.selected
+        if rc is None:
+            self.status.configure(text="Select a cell first, then tap Hint.")
+            return
+        if rc in self.given:
+            self.status.configure(text="That cell is a given clue.")
+            return
+        if self.solution is None:
+            return
+        r, c = rc
+        correct = self.solution[r][c]
+        if self.values.get(rc, 0) == correct:
+            self.status.configure(text="That cell is already correct.")
+            return
+        self._push_undo()
+        self.values[rc] = correct
+        self.solved_cells.add(rc)       # revealed, not earned — colored like Solve
+        if self.settings["entry_clears_notes"]:
+            self.notes[rc] = []
+            self._clear_peer_notes(rc, correct)
+        self._refresh_board()
+        self.status.configure(text="Hint revealed.")
+        self._check_win()
 
     def check(self):
         wrong = 0
