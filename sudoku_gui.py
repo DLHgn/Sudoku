@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
     "notes_clear": True,        # entering a big number clears that cell's notes
+    "peer_notes_clear": True,   # a correct entry clears that digit's notes in peers
     "highlight_related": True,  # tint matching numbers + selection's row/col
     "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
 }
@@ -566,9 +567,33 @@ class SudokuGUI:
         self.solved_cells.discard(rc)   # a player value is no longer "solved"
         if self.settings["notes_clear"]:
             self.notes[rc] = []     # entering a real number clears notes (setting)
+        # When a correct value is placed, that digit can no longer go in any
+        # peer cell, so strip it from their pencil notes (setting, default on).
+        if (self.settings["peer_notes_clear"] and self.solution is not None
+                and d == self.solution[rc[0]][rc[1]]):
+            self._clear_peer_notes(rc, d)
         # The selection's value just changed, so which cells "match" changes too.
         self._refresh_board()
         self._check_win()
+
+    def _clear_peer_notes(self, rc, d):
+        """Remove digit `d` from the pencil notes of every cell sharing rc's
+        row, column, or 3x3 box. Cells are repainted by the caller's full
+        refresh, so no per-cell redraw is needed here."""
+        r, c = rc
+        br, bc = (r // BOX) * BOX, (c // BOX) * BOX
+        peers = set()
+        for i in range(SIZE):
+            peers.add((r, i))           # row
+            peers.add((i, c))           # column
+        for i in range(BOX):
+            for j in range(BOX):
+                peers.add((br + i, bc + j))  # box
+        peers.discard(rc)
+        for p in peers:
+            notes = self.notes.get(p)
+            if notes and d in notes:
+                notes.remove(d)
 
     def _toggle_note(self, rc, d):
         if self.values.get(rc, 0) != 0:
@@ -741,6 +766,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.highlight_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
+        # Peer-notes-clear toggle
+        ctk.CTkLabel(self, text="Correct entry clears peer notes").grid(
+            row=row, column=0, sticky="w", **pad)
+        self.peernotes_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_peernotes)
+        if self.draft["peer_notes_clear"]:
+            self.peernotes_switch.select()
+        else:
+            self.peernotes_switch.deselect()
+        self.peernotes_switch.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
         ctk.CTkButton(btns, text="Restore Defaults", width=120,
@@ -785,6 +822,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["highlight_related"] = bool(self.highlight_switch.get())
         self._preview()
 
+    def _toggle_peernotes(self):
+        self.draft["peer_notes_clear"] = bool(self.peernotes_switch.get())
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
@@ -811,6 +852,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["highlight_related"] = DEFAULT_SETTINGS["highlight_related"]
         (self.highlight_switch.select if self.draft["highlight_related"]
          else self.highlight_switch.deselect)()
+        self.draft["peer_notes_clear"] = DEFAULT_SETTINGS["peer_notes_clear"]
+        (self.peernotes_switch.select if self.draft["peer_notes_clear"]
+         else self.peernotes_switch.deselect)()
         self._preview()
 
     def _cancel(self):
