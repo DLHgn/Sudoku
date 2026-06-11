@@ -15,6 +15,7 @@ persist to a JSON file next to this script.
 import json
 import os
 import threading
+import time
 import tkinter as tk
 
 import customtkinter as ctk
@@ -76,6 +77,7 @@ DEFAULT_SETTINGS = {
     "notes_clear": True,        # entering a big number clears that cell's notes
     "peer_notes_clear": True,   # placing a digit clears that digit's notes in peers
     "highlight_related": True,  # tint matching numbers + selection's row/col
+    "show_timer": False,        # show an elapsed-time clock above the board
     "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
 }
 
@@ -188,6 +190,10 @@ class SudokuGUI:
         self.notes_mode = False  # when True, typed digits toggle notes
         self._undo_stack = []    # snapshots of prior states (most recent last)
         self._redo_stack = []    # snapshots undone, redo-able until a new action
+        self._timer_start = None  # monotonic ts when the clock last started
+        self._timer_accum = 0.0   # seconds banked before the current run
+        self._timer_running = False
+        self._timer_job = None    # pending after() id for the tick loop
         self._generating = False
         self._gen_result = None
         self.cache = puzzle_cache.PuzzleCache()  # rolling per-tier puzzle store
@@ -205,7 +211,7 @@ class SudokuGUI:
         # holds keyboard focus; clicks select cells. This avoids the layering
         # limits of placing 81 widgets on a canvas (notes can sit "in" a cell).
         self.canvas = ctk.CTkCanvas(self.root, highlightthickness=0, bd=0)
-        self.canvas.grid(row=0, column=0, padx=16, pady=16)
+        self.canvas.grid(row=1, column=0, padx=16, pady=16)
 
         self.cell_rect = {}     # (r, c) -> canvas rectangle id (background)
         self.cell_origin = {}   # (r, c) -> (x, y) top-left pixel
@@ -384,9 +390,15 @@ class SudokuGUI:
         return normal
 
     def _build_controls(self):
+        # Optional elapsed-time clock above the board (row 0; toggled in Settings,
+        # hidden via grid_remove when off). Board sits at row 1.
+        self.timer_label = ctk.CTkLabel(self.root, text="00:00",
+                                        font=("Helvetica", 18))
+        self.timer_label.grid(row=0, column=0, pady=(12, 0))
+
         # Difficulty selector on its own row above the action buttons.
         diff_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        diff_row.grid(row=1, column=0, pady=(0, 6))
+        diff_row.grid(row=2, column=0, pady=(0, 6))
         ctk.CTkLabel(diff_row, text="Difficulty:").grid(row=0, column=0, padx=(0, 6))
         self.difficulty_menu = ctk.CTkOptionMenu(
             diff_row, values=DIFFICULTY_ORDER, width=140,
@@ -395,7 +407,7 @@ class SudokuGUI:
         self.difficulty_menu.grid(row=0, column=1)
 
         self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.bar.grid(row=2, column=0, pady=(0, 8))
+        self.bar.grid(row=3, column=0, pady=(0, 8))
 
         ctk.CTkButton(self.bar, text="New Game", width=84,
                       command=self._new_game_clicked
@@ -421,7 +433,7 @@ class SudokuGUI:
         self.redo_btn.grid(row=0, column=1, padx=4)
 
         self.status = ctk.CTkLabel(self.root, text="")
-        self.status.grid(row=3, column=0, pady=(0, 12))
+        self.status.grid(row=4, column=0, pady=(0, 12))
 
     def _new_game_clicked(self):
         self.new_game(self.settings["difficulty"])
@@ -444,6 +456,7 @@ class SudokuGUI:
     def _apply_settings(self):
         ctk.set_appearance_mode(self.settings["appearance"])
         self._layout_grid()
+        self._apply_timer_visibility()
 
     def open_settings(self):
         SettingsDialog(self.root, self.settings,
@@ -523,6 +536,7 @@ class SudokuGUI:
             self._paint_cell(rc)
             self._render_cell_text(rc)
         self._reset_history()       # a fresh puzzle starts with empty history
+        self._start_timer()         # and a fresh clock
 
     # ---- interaction -----------------------------------------------------
 
@@ -650,8 +664,14 @@ class SudokuGUI:
 
     def _check_win(self):
         if self._is_complete() and self._is_correct():
-            self.status.configure(text="Solved! Well done.")
-            messagebox.showinfo("Sudoku", "You solved it!")
+            self._stop_timer()      # freeze the clock on a win
+            if self.settings["show_timer"]:
+                t = self._format_time(self._timer_elapsed())
+                self.status.configure(text=f"Solved in {t}! Well done.")
+                messagebox.showinfo("Sudoku", f"You solved it in {t}!")
+            else:
+                self.status.configure(text="Solved! Well done.")
+                messagebox.showinfo("Sudoku", "You solved it!")
 
     def toggle_notes_mode(self):
         self.notes_mode = not self.notes_mode
@@ -695,6 +715,8 @@ class SudokuGUI:
             self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
+        # Revealing the solution ends the attempt, so freeze the clock.
+        self._stop_timer()
         # One snapshot for the whole reveal, so a single undo restores play.
         self._push_undo()
         for (r, c) in self.all_cells:
@@ -772,6 +794,73 @@ class SudokuGUI:
     def _on_redo_key(self, event):
         self.redo()
         return "break"
+
+    # ---- timer -----------------------------------------------------------
+    # The clock always tracks elapsed time for the current puzzle (via
+    # time.monotonic, so it can't drift or be skewed by clock changes); the
+    # `show_timer` setting only controls whether the label is visible. Ticking
+    # is driven by root.after on the main thread (never a background thread).
+
+    def _timer_elapsed(self):
+        """Seconds elapsed on the current puzzle (running or frozen)."""
+        e = self._timer_accum
+        if self._timer_running and self._timer_start is not None:
+            e += time.monotonic() - self._timer_start
+        return e
+
+    @staticmethod
+    def _format_time(secs):
+        secs = int(secs)
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _update_timer_label(self):
+        self.timer_label.configure(text=self._format_time(self._timer_elapsed()))
+
+    def _cancel_timer_job(self):
+        if self._timer_job is not None:
+            self.root.after_cancel(self._timer_job)
+            self._timer_job = None
+
+    def _tick_timer(self):
+        """Refresh the label once a second while the clock runs and is shown.
+        The loop only schedules itself when visible; elapsed time is still
+        tracked via monotonic when hidden, so toggling on shows the right value."""
+        self._timer_job = None
+        self._update_timer_label()
+        if self._timer_running and self.settings["show_timer"]:
+            self._timer_job = self.root.after(1000, self._tick_timer)
+
+    def _start_timer(self):
+        """Begin timing a fresh puzzle from zero."""
+        self._cancel_timer_job()
+        self._timer_accum = 0.0
+        self._timer_start = time.monotonic()
+        self._timer_running = True
+        if self.settings["show_timer"]:
+            self._tick_timer()
+
+    def _stop_timer(self):
+        """Freeze the clock, banking elapsed time (idempotent)."""
+        if self._timer_running:
+            self._timer_accum += time.monotonic() - self._timer_start
+            self._timer_running = False
+            self._timer_start = None
+        self._cancel_timer_job()
+        self._update_timer_label()
+
+    def _apply_timer_visibility(self):
+        """Show or hide the clock per the setting; (re)start the tick loop when
+        showing a running clock. Called via _apply_settings (incl. live preview)."""
+        if self.settings["show_timer"]:
+            self.timer_label.grid()         # restore to its row
+            self._update_timer_label()
+            if self._timer_running and self._timer_job is None:
+                self._tick_timer()
+        else:
+            self.timer_label.grid_remove()
+            self._cancel_timer_job()
 
 
 class SettingsDialog(ctk.CTkToplevel):
@@ -876,6 +965,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.peernotes_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
+        # Show-timer toggle
+        ctk.CTkLabel(self, text="Show timer").grid(
+            row=row, column=0, sticky="w", **pad)
+        self.timer_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_timer)
+        if self.draft["show_timer"]:
+            self.timer_switch.select()
+        else:
+            self.timer_switch.deselect()
+        self.timer_switch.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
         ctk.CTkButton(btns, text="Restore Defaults", width=120,
@@ -924,6 +1025,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["peer_notes_clear"] = bool(self.peernotes_switch.get())
         self._preview()
 
+    def _toggle_timer(self):
+        self.draft["show_timer"] = bool(self.timer_switch.get())
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
@@ -953,6 +1058,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["peer_notes_clear"] = DEFAULT_SETTINGS["peer_notes_clear"]
         (self.peernotes_switch.select if self.draft["peer_notes_clear"]
          else self.peernotes_switch.deselect)()
+        self.draft["show_timer"] = DEFAULT_SETTINGS["show_timer"]
+        (self.timer_switch.select if self.draft["show_timer"]
+         else self.timer_switch.deselect)()
         self._preview()
 
     def _cancel(self):
