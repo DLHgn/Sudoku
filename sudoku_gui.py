@@ -441,9 +441,22 @@ class SudokuGUI:
             **_ghost_button_kwargs())
         self.settings_btn.grid(row=0, column=2, sticky="e")
 
-        # ---- bottom bar: [undo redo]  ·  Notes  ·  [Check Solve]
+        # ---- number palette: 1-9, places into the selected cell and dims when
+        # all 9 of a digit are on the board (mouse-only play + 'what's left' aid).
+        palette = ctk.CTkFrame(self.root, fg_color="transparent")
+        palette.grid(row=2, column=0, pady=(0, 8))
+        self.palette_buttons = {}
+        for i, d in enumerate(range(1, 10)):
+            b = ctk.CTkButton(palette, text=str(d), width=40, height=40,
+                              corner_radius=8, font=("Helvetica", 16, "bold"),
+                              command=lambda n=d: self._palette_click(n),
+                              **_ghost_button_kwargs())
+            b.grid(row=0, column=i, padx=2)
+            self.palette_buttons[d] = b
+
+        # ---- bottom bar: [undo redo]  ·  Notes  ·  [Check Hint Solve]
         bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        bar.grid(row=2, column=0, sticky="ew", padx=16, pady=(2, 4))
+        bar.grid(row=3, column=0, sticky="ew", padx=16, pady=(2, 4))
         bar.columnconfigure(0, weight=1)         # left/right expand, centering Notes
         bar.columnconfigure(2, weight=1)
 
@@ -478,7 +491,7 @@ class SudokuGUI:
 
         self.status = ctk.CTkLabel(self.root, text="",
                                    text_color=("#6a6a6a", "#9a9a9a"))
-        self.status.grid(row=3, column=0, pady=(2, 12))
+        self.status.grid(row=4, column=0, pady=(2, 12))
 
     def _new_game_clicked(self):
         # Opens the difficulty picker (defaulting to the current tier); the
@@ -586,6 +599,7 @@ class SudokuGUI:
             self._render_cell_text(rc)
         self._reset_history()       # a fresh puzzle starts with empty history
         self._start_timer()         # and a fresh clock
+        self._update_palette()      # reflect the givens in the number tray
 
     # ---- interaction -----------------------------------------------------
 
@@ -612,6 +626,7 @@ class SudokuGUI:
     def _refresh_board(self):
         for cell in self.all_cells:
             self._paint_cell(cell)
+        self._update_palette()
 
     # Some keyboard layouts report Shift+digit as the symbol keysym rather than
     # the digit. Map those back so Shift-noting works regardless of layout.
@@ -774,6 +789,36 @@ class SudokuGUI:
         self.status.configure(text="Hint revealed.")
         self._check_win()
 
+    def _palette_click(self, d):
+        """Place digit `d` into the selected cell via the number palette (or
+        toggle it as a note when Notes mode is on) — the mouse equivalent of
+        typing the digit."""
+        rc = self.selected
+        if rc is None:
+            self.status.configure(text="Select a cell first, then tap a number.")
+            return
+        if rc in self.given:
+            return                          # can't edit a given clue
+        if self.notes_mode:
+            self._toggle_note(rc, d)
+        else:
+            self._set_value(rc, d)
+        self.focus_sink.focus_set()         # keep keyboard input flowing too
+
+    def _update_palette(self):
+        """Dim (disable) a palette number once all 9 of that digit are on the
+        board; re-enable if a placement is removed. Raw placement count, so it
+        doesn't peek at the solution."""
+        if not hasattr(self, "palette_buttons"):
+            return
+        counts = {d: 0 for d in range(1, 10)}
+        for rc in self.all_cells:
+            v = self.values.get(rc, 0)
+            if v:
+                counts[v] = counts.get(v, 0) + 1
+        for d, btn in self.palette_buttons.items():
+            btn.configure(state="disabled" if counts[d] >= 9 else "normal")
+
     def check(self):
         wrong = 0
         for rc in self.all_cells:
@@ -818,6 +863,7 @@ class SudokuGUI:
             self._paint_cell(rc)
             self._render_cell_text(rc)
         self.status.configure(text="Solution revealed.")
+        self._update_palette()      # everything placed -> all numbers dim
         self.focus_sink.focus_set()
 
     # ---- undo / redo -----------------------------------------------------
