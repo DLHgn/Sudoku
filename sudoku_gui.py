@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 
 import customtkinter as ctk
-from tkinter import colorchooser, messagebox
+from tkinter import colorchooser
 from tkinter import font as tkfont
 
 try:
@@ -715,10 +715,12 @@ class SudokuGUI:
             if self.settings["show_timer"]:
                 t = self._format_time(self._timer_elapsed())
                 self.status.configure(text=f"Solved in {t}! Well done.")
-                messagebox.showinfo("Sudoku", f"You solved it in {t}!")
+                msg = f"You solved it in {t}!"
             else:
                 self.status.configure(text="Solved! Well done.")
-                messagebox.showinfo("Sudoku", "You solved it!")
+                msg = "You solved it!"
+            ConfirmDialog(self.root, "Sudoku", msg,
+                          confirm_text="Nice!", cancel_text=None)
 
     def toggle_notes_mode(self):
         self.notes_mode = not self.notes_mode
@@ -763,9 +765,19 @@ class SudokuGUI:
             self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
-        # Revealing the solution ends the attempt, so freeze the clock.
+        # Confirm first so an accidental click can't wipe the puzzle. Uses a
+        # custom CTk dialog rather than tkinter.messagebox, which can SIGTRAP on
+        # macOS when the canvas is redrawn as a native dialog unwinds.
+        ConfirmDialog(
+            self.root, "Reveal solution?",
+            "This fills in the entire solution and ends the puzzle.\n"
+            "You can still undo afterwards.",
+            on_confirm=self._do_solve, confirm_text="Reveal", cancel_text="Cancel")
+
+    def _do_solve(self):
+        # Revealing ends the attempt, so freeze the clock; one undo snapshot
+        # covers the whole reveal.
         self._stop_timer()
-        # One snapshot for the whole reveal, so a single undo restores play.
         self._push_undo()
         for (r, c) in self.all_cells:
             rc = (r, c)
@@ -777,6 +789,7 @@ class SudokuGUI:
             self._paint_cell(rc)
             self._render_cell_text(rc)
         self.status.configure(text="Solution revealed.")
+        self.focus_sink.focus_set()
 
     # ---- undo / redo -----------------------------------------------------
 
@@ -1165,6 +1178,53 @@ class NewGameDialog(ctk.CTkToplevel):
     def _choose(self, diff):
         self.destroy()
         self.on_choose(diff)
+
+
+class ConfirmDialog(ctk.CTkToplevel):
+    """Small modal dialog. With a cancel button it's a yes/no confirm (calls
+    on_confirm() only if confirmed); with cancel_text=None it's a one-button
+    acknowledgement. Replaces tkinter.messagebox, which can crash on macOS when
+    the board is redrawn as the native dialog unwinds."""
+
+    def __init__(self, parent, title, message, on_confirm=None,
+                 confirm_text="OK", cancel_text="Cancel"):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.on_confirm = on_confirm
+
+        ctk.CTkLabel(self, text=message, wraplength=340,
+                     justify="center").grid(row=0, column=0, padx=28,
+                                            pady=(24, 18))
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=1, column=0, pady=(0, 22))
+        col = 0
+        if cancel_text is not None:
+            ctk.CTkButton(btns, text=cancel_text, width=110, height=34,
+                          corner_radius=8, command=self.destroy,
+                          **_ghost_button_kwargs()).grid(row=0, column=col, padx=6)
+            col += 1
+        confirm = ctk.CTkButton(btns, text=confirm_text, width=110, height=34,
+                                corner_radius=8, command=self._confirm)
+        confirm.grid(row=0, column=col, padx=6)
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.transient(parent)
+        self.after(10, self.grab_set)   # CTkToplevel must map before grabbing
+        self.update_idletasks()
+        self._center_on(parent)
+
+    def _center_on(self, parent):
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
+
+    def _confirm(self):
+        self.destroy()
+        if self.on_confirm is not None:
+            self.on_confirm()
 
 
 def main():
