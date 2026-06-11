@@ -51,12 +51,19 @@ GIVEN_FG = ("#1a1a1a", "#f0f0f0")   # original clues (locked)
 USER_FG = ("#1565c0", "#5fa8ff")    # player-entered values
 SOLVED_FG = ("#2e7d32", "#5fd36a")  # auto-solve fills
 NOTE_FG = ("#888888", "#aaaaaa")    # pencil-mark notes (dimmer than values)
+NOTE_MATCH_FG = ("#1565c0", "#5fa8ff")  # a note matching the selected number
 
 # Cell backgrounds (tuples for light/dark). Cells are plain tk widgets on the
 # canvas, so these are resolved to a single color at render time.
 CELL_BG = ("#ffffff", "#2b2b2b")
 
 LINE_COLOR = ("#3a3a3a", "#888888")  # grid lines, per appearance mode
+
+# Related-cell highlighting (when a cell is selected). PEER tints the selection's
+# row and column; MATCH tints every cell holding the same big value. (light, dark)
+# tuples so they read in either appearance; resolved at paint time.
+PEER_BG = ("#ececec", "#3c3c3c")   # row/column of the selection (neutral grey)
+MATCH_BG = ("#cfe0f5", "#24455f")  # same number as the selection (blue wash)
 
 # User-configurable settings + defaults (what gets saved/loaded).
 DEFAULT_SETTINGS = {
@@ -67,6 +74,7 @@ DEFAULT_SETTINGS = {
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
     "notes_clear": True,        # entering a big number clears that cell's notes
+    "highlight_related": True,  # tint matching numbers + selection's row/col
     "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
 }
 
@@ -257,9 +265,18 @@ class SudokuGUI:
 
     BIG_FONT = ("Helvetica", 20, "bold")
     NOTE_FONT = ("Helvetica", 11)
+    NOTE_MATCH_FONT = ("Helvetica", 11, "bold")
 
     def _content_tag(self, rc):
         return "content_%d_%d" % rc
+
+    def _active_number(self):
+        """The big value of the current selection (0 if nothing is selected or
+        the selected cell is empty). Used to highlight matching values and
+        notes across the board."""
+        if self.selected is None:
+            return 0
+        return self.values.get(self.selected, 0)
 
     def _render_cell_text(self, rc):
         """Draw the cell's contents on the canvas: a big centered value, or a
@@ -279,7 +296,12 @@ class SudokuGUI:
                                     text=str(val), fill=fg, font=self.BIG_FONT,
                                     tags=self._content_tag(rc))
         elif notes:
-            color = _resolve(NOTE_FG, mode)
+            normal = _resolve(NOTE_FG, mode)
+            match = _resolve(NOTE_MATCH_FG, mode)
+            # A note is "hot" when it matches the selected cell's value and
+            # related highlighting is on; hot notes render bold and tinted.
+            active = (self._active_number()
+                      if self.settings["highlight_related"] else 0)
             third = CELL_PX / 3
             for n in notes:
                 if not 1 <= n <= 9:
@@ -287,8 +309,11 @@ class SudokuGUI:
                 sr, sc = divmod(n - 1, 3)       # fixed slot from digit value
                 cx = ox + third * (sc + 0.5)
                 cy = oy + third * (sr + 0.5)
-                self.canvas.create_text(cx, cy, text=str(n), fill=color,
-                                        font=self.NOTE_FONT,
+                hot = (active != 0 and n == active)
+                self.canvas.create_text(cx, cy, text=str(n),
+                                        fill=match if hot else normal,
+                                        font=self.NOTE_MATCH_FONT if hot
+                                        else self.NOTE_FONT,
                                         tags=self._content_tag(rc))
 
     def _value_color(self, rc, mode):
@@ -307,23 +332,43 @@ class SudokuGUI:
         return _resolve(USER_FG, mode)
 
     def _paint_cell(self, rc):
-        """Set a cell's background rectangle color from its state: selected ->
-        highlight, wrong big value (auto-check) -> error, else normal. Then
-        refresh its contents so value colors track the background."""
+        """Set a cell's background by state, in priority order: selected ->
+        highlight; wrong big value (auto-check) -> error; same number as the
+        selection -> match tint; selection's row/column -> peer tint; else
+        normal. Then refresh contents so value colors track the background."""
         if rc not in self.cell_rect:
             return
         mode = self._mode()
+        val = self.values.get(rc, 0)
+
         if rc == self.selected and rc not in self.given:
             bg = self.settings["highlight_bg"]
+        elif (self.settings["auto_check"] and val != 0
+                and rc not in self.given and self.solution is not None
+                and val != self.solution[rc[0]][rc[1]]):
+            bg = self.settings["error_bg"]
         else:
-            val = self.values.get(rc, 0)
-            wrong = (self.settings["auto_check"] and val != 0
-                     and rc not in self.given and self.solution is not None
-                     and val != self.solution[rc[0]][rc[1]])
-            bg = self.settings["error_bg"] if wrong else _resolve(CELL_BG, mode)
+            bg = self._related_bg(rc, val, mode)
+
         self.canvas.itemconfig(self.cell_rect[rc], fill=bg)
         # Redraw contents so the value's foreground matches the new background.
         self._render_cell_text(rc)
+
+    def _related_bg(self, rc, val, mode):
+        """Background for a cell that isn't selected or flagged-wrong: a match or
+        peer tint relative to the current selection, else the normal cell color.
+        Normal when highlighting is off or nothing is selected."""
+        normal = _resolve(CELL_BG, mode)
+        if not self.settings["highlight_related"] or self.selected is None:
+            return normal
+        if rc == self.selected:          # focal (e.g. given) cell stays plain
+            return normal
+        sel_val = self.values.get(self.selected, 0)
+        if sel_val != 0 and val == sel_val:
+            return _resolve(MATCH_BG, mode)
+        if rc[0] == self.selected[0] or rc[1] == self.selected[1]:
+            return _resolve(PEER_BG, mode)
+        return normal
 
     def _build_controls(self):
         # Difficulty selector on its own row above the action buttons.
@@ -472,11 +517,14 @@ class SudokuGUI:
         self.focus_sink.focus_set()   # keep keyboard input flowing
 
     def _select(self, rc):
-        prev = self.selected
         self.selected = rc
-        if prev and prev != rc:
-            self._paint_cell(prev)    # repaint (and possibly flag) the cell we left
-        self._paint_cell(rc)          # highlight the newly selected cell
+        # Related-cell highlighting depends on the whole board relative to the
+        # selection, so repaint every cell (cheap at 81).
+        self._refresh_board()
+
+    def _refresh_board(self):
+        for cell in self.all_cells:
+            self._paint_cell(cell)
 
     # Some keyboard layouts report Shift+digit as the symbol keysym rather than
     # the digit. Map those back so Shift-noting works regardless of layout.
@@ -518,8 +566,8 @@ class SudokuGUI:
         self.solved_cells.discard(rc)   # a player value is no longer "solved"
         if self.settings["notes_clear"]:
             self.notes[rc] = []     # entering a real number clears notes (setting)
-        self._paint_cell(rc)
-        self._render_cell_text(rc)
+        # The selection's value just changed, so which cells "match" changes too.
+        self._refresh_board()
         self._check_win()
 
     def _toggle_note(self, rc, d):
@@ -541,8 +589,8 @@ class SudokuGUI:
             self.solved_cells.discard(rc)
         else:
             self.notes[rc] = []
-        self._paint_cell(rc)
-        self._render_cell_text(rc)
+        # Clearing a value can change which cells match the selection.
+        self._refresh_board()
 
     def _check_win(self):
         if self._is_complete() and self._is_correct():
@@ -681,6 +729,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self.notesclear_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
+        # Highlight-related toggle
+        ctk.CTkLabel(self, text="Highlight related cells").grid(
+            row=row, column=0, sticky="w", **pad)
+        self.highlight_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_highlight)
+        if self.draft["highlight_related"]:
+            self.highlight_switch.select()
+        else:
+            self.highlight_switch.deselect()
+        self.highlight_switch.grid(row=row, column=1, sticky="w", **pad)
+        row += 1
+
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
         ctk.CTkButton(btns, text="Restore Defaults", width=120,
@@ -721,6 +781,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["notes_clear"] = bool(self.notesclear_switch.get())
         self._preview()
 
+    def _toggle_highlight(self):
+        self.draft["highlight_related"] = bool(self.highlight_switch.get())
+        self._preview()
+
     def _pick(self, key):
         chosen = colorchooser.askcolor(color=self.draft[key],
                                        parent=self, title="Pick a color")
@@ -744,6 +808,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["notes_clear"] = DEFAULT_SETTINGS["notes_clear"]
         (self.notesclear_switch.select if self.draft["notes_clear"]
          else self.notesclear_switch.deselect)()
+        self.draft["highlight_related"] = DEFAULT_SETTINGS["highlight_related"]
+        (self.highlight_switch.select if self.draft["highlight_related"]
+         else self.highlight_switch.deselect)()
         self._preview()
 
     def _cancel(self):
