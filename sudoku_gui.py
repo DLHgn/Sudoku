@@ -74,8 +74,7 @@ DEFAULT_SETTINGS = {
     "cell_line": 1,             # px, lines between cells
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
-    "notes_clear": True,        # entering a big number clears that cell's notes
-    "peer_notes_clear": True,   # placing a digit clears that digit's notes in peers
+    "entry_clears_notes": True,  # placing a digit clears notes in that cell and its peers
     "highlight_related": True,  # tint matching numbers + selection's row/col
     "show_timer": False,        # show an elapsed-time clock above the board
     "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
@@ -650,12 +649,11 @@ class SudokuGUI:
         self._push_undo()
         self.values[rc] = d
         self.solved_cells.discard(rc)   # a player value is no longer "solved"
-        if self.settings["notes_clear"]:
-            self.notes[rc] = []     # entering a real number clears notes (setting)
-        # Placing a digit removes it as a pencil-mark candidate from every peer
-        # (row/column/box), regardless of correctness — a mistaken entry is
-        # recoverable via undo. Gated on the peer_notes_clear setting.
-        if self.settings["peer_notes_clear"]:
+        # Auto-tidy pencil marks (one setting): clear this cell's own notes and
+        # remove the placed digit from every peer's notes (row/column/box). Done
+        # regardless of correctness — a mistaken entry is recoverable via undo.
+        if self.settings["entry_clears_notes"]:
+            self.notes[rc] = []
             self._clear_peer_notes(rc, d)
         # The selection's value just changed, so which cells "match" changes too.
         self._refresh_board()
@@ -1011,16 +1009,16 @@ class SettingsDialog(ctk.CTkToplevel):
         self.autocheck_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
-        # Notes-clear toggle
-        ctk.CTkLabel(self, text="Number clears notes").grid(
+        # Entry-clears-notes toggle (own cell + peers, combined)
+        ctk.CTkLabel(self, text="Entry clears notes").grid(
             row=row, column=0, sticky="w", **pad)
-        self.notesclear_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_notesclear)
-        if self.draft["notes_clear"]:
-            self.notesclear_switch.select()
+        self.entrynotes_switch = ctk.CTkSwitch(
+            self, text="", command=self._toggle_entrynotes)
+        if self.draft["entry_clears_notes"]:
+            self.entrynotes_switch.select()
         else:
-            self.notesclear_switch.deselect()
-        self.notesclear_switch.grid(row=row, column=1, sticky="w", **pad)
+            self.entrynotes_switch.deselect()
+        self.entrynotes_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
         # Highlight-related toggle
@@ -1033,18 +1031,6 @@ class SettingsDialog(ctk.CTkToplevel):
         else:
             self.highlight_switch.deselect()
         self.highlight_switch.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Peer-notes-clear toggle
-        ctk.CTkLabel(self, text="Entry clears peer notes").grid(
-            row=row, column=0, sticky="w", **pad)
-        self.peernotes_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_peernotes)
-        if self.draft["peer_notes_clear"]:
-            self.peernotes_switch.select()
-        else:
-            self.peernotes_switch.deselect()
-        self.peernotes_switch.grid(row=row, column=1, sticky="w", **pad)
         row += 1
 
         # Show-timer toggle
@@ -1095,16 +1081,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["auto_check"] = bool(self.autocheck_switch.get())
         self._preview()
 
-    def _toggle_notesclear(self):
-        self.draft["notes_clear"] = bool(self.notesclear_switch.get())
+    def _toggle_entrynotes(self):
+        self.draft["entry_clears_notes"] = bool(self.entrynotes_switch.get())
         self._preview()
 
     def _toggle_highlight(self):
         self.draft["highlight_related"] = bool(self.highlight_switch.get())
-        self._preview()
-
-    def _toggle_peernotes(self):
-        self.draft["peer_notes_clear"] = bool(self.peernotes_switch.get())
         self._preview()
 
     def _toggle_timer(self):
@@ -1131,15 +1113,12 @@ class SettingsDialog(ctk.CTkToplevel):
         self.draft["auto_check"] = DEFAULT_SETTINGS["auto_check"]
         (self.autocheck_switch.select if self.draft["auto_check"]
          else self.autocheck_switch.deselect)()
-        self.draft["notes_clear"] = DEFAULT_SETTINGS["notes_clear"]
-        (self.notesclear_switch.select if self.draft["notes_clear"]
-         else self.notesclear_switch.deselect)()
+        self.draft["entry_clears_notes"] = DEFAULT_SETTINGS["entry_clears_notes"]
+        (self.entrynotes_switch.select if self.draft["entry_clears_notes"]
+         else self.entrynotes_switch.deselect)()
         self.draft["highlight_related"] = DEFAULT_SETTINGS["highlight_related"]
         (self.highlight_switch.select if self.draft["highlight_related"]
          else self.highlight_switch.deselect)()
-        self.draft["peer_notes_clear"] = DEFAULT_SETTINGS["peer_notes_clear"]
-        (self.peernotes_switch.select if self.draft["peer_notes_clear"]
-         else self.peernotes_switch.deselect)()
         self.draft["show_timer"] = DEFAULT_SETTINGS["show_timer"]
         (self.timer_switch.select if self.draft["show_timer"]
          else self.timer_switch.deselect)()
