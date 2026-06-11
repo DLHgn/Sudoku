@@ -170,6 +170,35 @@ def _resolve(color, mode):
     return color
 
 
+# ---- button styling --------------------------------------------------------
+# Two reusable looks layered over CustomTkinter's theme: an "accent" (the
+# theme's filled primary, used for the main action and active toggles) and a
+# "ghost" (subtle outline for secondary actions). Centralized so the main
+# window and dialogs stay visually consistent.
+
+def _theme_button_colors():
+    """The active theme's default (fg, hover, text) button colors. Falls back
+    to blue-theme values if the ThemeManager API differs across versions."""
+    try:
+        t = ctk.ThemeManager.theme["CTkButton"]
+        return t["fg_color"], t["hover_color"], t["text_color"]
+    except Exception:
+        return ("#3a7ebf", "#1f538d"), ("#325882", "#14375e"), "#dce4ee"
+
+
+def _accent_button_kwargs():
+    fg, hover, text = _theme_button_colors()
+    return {"fg_color": fg, "hover_color": hover, "text_color": text,
+            "border_width": 0}
+
+
+def _ghost_button_kwargs():
+    return {"fg_color": "transparent", "border_width": 1,
+            "border_color": ("#c2c2c2", "#4a4a4a"),
+            "text_color": ("#1a1a1a", "#e6e6e6"),
+            "hover_color": ("#ececec", "#333333")}
+
+
 class SudokuGUI:
     def __init__(self, root):
         self.root = root
@@ -211,7 +240,7 @@ class SudokuGUI:
         # holds keyboard focus; clicks select cells. This avoids the layering
         # limits of placing 81 widgets on a canvas (notes can sit "in" a cell).
         self.canvas = ctk.CTkCanvas(self.root, highlightthickness=0, bd=0)
-        self.canvas.grid(row=1, column=0, padx=16, pady=16)
+        self.canvas.grid(row=1, column=0, padx=16, pady=(6, 12))
 
         self.cell_rect = {}     # (r, c) -> canvas rectangle id (background)
         self.cell_origin = {}   # (r, c) -> (x, y) top-left pixel
@@ -390,61 +419,78 @@ class SudokuGUI:
         return normal
 
     def _build_controls(self):
-        # Optional elapsed-time clock above the board (row 0; toggled in Settings,
-        # hidden via grid_remove when off). Board sits at row 1.
-        self.timer_label = ctk.CTkLabel(self.root, text="00:00",
-                                        font=("Helvetica", 18))
-        self.timer_label.grid(row=0, column=0, pady=(12, 0))
+        icon_font = ("Helvetica", 18)
 
-        # Difficulty selector on its own row above the action buttons.
-        diff_row = ctk.CTkFrame(self.root, fg_color="transparent")
-        diff_row.grid(row=2, column=0, pady=(0, 6))
-        ctk.CTkLabel(diff_row, text="Difficulty:").grid(row=0, column=0, padx=(0, 6))
-        self.difficulty_menu = ctk.CTkOptionMenu(
-            diff_row, values=DIFFICULTY_ORDER, width=140,
-            command=self._on_difficulty_change)
-        self.difficulty_menu.set(self.settings["difficulty"])
-        self.difficulty_menu.grid(row=0, column=1)
+        # ---- top header: New Game (left) · timer (center) · settings gear (right)
+        header = ctk.CTkFrame(self.root, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 0))
+        header.columnconfigure(1, weight=1)     # center column absorbs slack
 
-        self.bar = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.bar.grid(row=3, column=0, pady=(0, 8))
+        self.newgame_btn = ctk.CTkButton(
+            header, text="+", width=40, height=34, corner_radius=8,
+            font=("Helvetica", 22), command=self._new_game_clicked,
+            **_ghost_button_kwargs())
+        self.newgame_btn.grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(self.bar, text="New Game", width=84,
-                      command=self._new_game_clicked
-                      ).grid(row=0, column=0, padx=4)
-        self.notes_btn = ctk.CTkButton(self.bar, text="Notes: OFF", width=84,
-                                       command=self.toggle_notes_mode)
-        self.notes_btn.grid(row=0, column=1, padx=4)
-        ctk.CTkButton(self.bar, text="Check", width=84, command=self.check
-                      ).grid(row=0, column=2, padx=4)
-        ctk.CTkButton(self.bar, text="Solve", width=84, command=self.solve
-                      ).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(self.bar, text="Settings", width=84,
-                      command=self.open_settings).grid(row=0, column=4, padx=4)
+        self.timer_label = ctk.CTkLabel(header, text="00:00",
+                                        font=("Helvetica", 18, "bold"))
+        self.timer_label.grid(row=0, column=1)  # centered by the weighted column
 
-        # Undo/redo on a second, centered row so the window stays board-width.
-        hist = ctk.CTkFrame(self.bar, fg_color="transparent")
-        hist.grid(row=1, column=0, columnspan=5, pady=(8, 0))
-        self.undo_btn = ctk.CTkButton(hist, text="Undo", width=84,
-                                      command=self.undo)
-        self.undo_btn.grid(row=0, column=0, padx=4)
-        self.redo_btn = ctk.CTkButton(hist, text="Redo", width=84,
-                                      command=self.redo)
-        self.redo_btn.grid(row=0, column=1, padx=4)
+        self.settings_btn = ctk.CTkButton(
+            header, text="\u2699", width=40, height=34, corner_radius=8,
+            font=("Helvetica", 20), command=self.open_settings,
+            **_ghost_button_kwargs())
+        self.settings_btn.grid(row=0, column=2, sticky="e")
 
-        self.status = ctk.CTkLabel(self.root, text="")
-        self.status.grid(row=4, column=0, pady=(0, 12))
+        # ---- bottom bar: [undo redo]  ·  Notes  ·  [Check Solve]
+        bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        bar.grid(row=2, column=0, sticky="ew", padx=16, pady=(2, 4))
+        bar.columnconfigure(0, weight=1)         # left/right expand, centering Notes
+        bar.columnconfigure(2, weight=1)
+
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w")
+        self.undo_btn = ctk.CTkButton(left, text="\u21ba", width=40, height=34,
+                                      corner_radius=8, font=icon_font,
+                                      command=self.undo, **_ghost_button_kwargs())
+        self.undo_btn.grid(row=0, column=0, padx=(0, 6))
+        self.redo_btn = ctk.CTkButton(left, text="\u21bb", width=40, height=34,
+                                      corner_radius=8, font=icon_font,
+                                      command=self.redo, **_ghost_button_kwargs())
+        self.redo_btn.grid(row=0, column=1)
+
+        # Notes is a toggle: ghost when off, accent when on (set in toggle_notes_mode).
+        self.notes_btn = ctk.CTkButton(
+            bar, text="\u270e Notes", width=110, height=34, corner_radius=8,
+            command=self.toggle_notes_mode, **_ghost_button_kwargs())
+        self.notes_btn.grid(row=0, column=1, padx=8)
+
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.grid(row=0, column=2, sticky="e")
+        ctk.CTkButton(right, text="Check", width=80, height=34, corner_radius=8,
+                      command=self.check, **_ghost_button_kwargs()
+                      ).grid(row=0, column=0, padx=(0, 6))
+        ctk.CTkButton(right, text="Solve", width=80, height=34, corner_radius=8,
+                      command=self.solve, **_ghost_button_kwargs()
+                      ).grid(row=0, column=1)
+
+        self.status = ctk.CTkLabel(self.root, text="",
+                                   text_color=("#6a6a6a", "#9a9a9a"))
+        self.status.grid(row=3, column=0, pady=(2, 12))
 
     def _new_game_clicked(self):
-        self.new_game(self.settings["difficulty"])
+        # Opens the difficulty picker (defaulting to the current tier); the
+        # actual generation kicks off when a tier is chosen.
+        if self._generating:
+            return
+        NewGameDialog(self.root, self.settings["difficulty"],
+                      on_choose=self._start_new_game)
 
-    def _on_difficulty_change(self, value):
-        # Remember the choice (persisted) but don't disrupt the current puzzle;
-        # it takes effect on the next New Game.
-        self.settings["difficulty"] = value
+    def _start_new_game(self, difficulty):
+        # Persist the choice so the picker defaults to it next time, then play.
+        self.settings["difficulty"] = difficulty
         save_settings(self.settings)
-        self.status.configure(
-            text=f"Difficulty set to {value}. Starts on next New Game.")
+        self.new_game(difficulty)
 
     # ---- settings --------------------------------------------------------
 
@@ -486,7 +532,7 @@ class SudokuGUI:
         self._generating = True
         self._gen_result = None
         self.status.configure(text=f"Generating a {difficulty} puzzle...")
-        self.difficulty_menu.configure(state="disabled")
+        self.newgame_btn.configure(state="disabled")
 
         def work():
             puzzle, solution, actual, source = sudoku.make_rated_puzzle(
@@ -508,7 +554,8 @@ class SudokuGUI:
         self.selected = None
         self._render_puzzle()
         self._generating = False
-        self.difficulty_menu.configure(state="normal")
+        self.newgame_btn.configure(state="normal")
+        self.root.title(f"Sudoku \u2014 {requested}")
         if source == "fresh":
             self.status.configure(text=f"New game ({requested}). Good luck!")
         elif source == "cache":
@@ -675,8 +722,9 @@ class SudokuGUI:
 
     def toggle_notes_mode(self):
         self.notes_mode = not self.notes_mode
-        self.notes_btn.configure(
-            text="Notes: ON" if self.notes_mode else "Notes: OFF")
+        # The button's fill conveys state: accent (filled) on, ghost (outline) off.
+        style = _accent_button_kwargs() if self.notes_mode else _ghost_button_kwargs()
+        self.notes_btn.configure(text="\u270e Notes", **style)
         self.status.configure(
             text="Notes mode on — digits add pencil marks."
             if self.notes_mode else "Notes mode off.")
@@ -1071,6 +1119,52 @@ class SettingsDialog(ctk.CTkToplevel):
     def _save(self):
         self.on_save(self.draft)
         self.destroy()
+
+
+class NewGameDialog(ctk.CTkToplevel):
+    """Modal difficulty picker shown when starting a new game. The current
+    difficulty is highlighted (accent); clicking any tier starts that game
+    immediately. Cancel (or closing) leaves the current game untouched."""
+
+    def __init__(self, parent, current, on_choose):
+        super().__init__(parent)
+        self.title("New Game")
+        self.resizable(False, False)
+        self.on_choose = on_choose
+
+        ctk.CTkLabel(self, text="New Game",
+                     font=("Helvetica", 22, "bold")).grid(
+                         row=0, column=0, padx=28, pady=(22, 2))
+        ctk.CTkLabel(self, text="Choose a difficulty",
+                     text_color=("#6a6a6a", "#9a9a9a")).grid(
+                         row=1, column=0, padx=28, pady=(0, 14))
+
+        # Current tier renders accent (default CTkButton); the rest are ghost.
+        for i, diff in enumerate(DIFFICULTY_ORDER):
+            style = {} if diff == current else _ghost_button_kwargs()
+            ctk.CTkButton(self, text=diff, width=240, height=42, corner_radius=8,
+                          command=lambda d=diff: self._choose(d),
+                          **style).grid(row=2 + i, column=0, padx=28, pady=4)
+
+        ctk.CTkButton(self, text="Cancel", width=240, height=34, corner_radius=8,
+                      command=self.destroy, **_ghost_button_kwargs()).grid(
+                          row=2 + len(DIFFICULTY_ORDER), column=0,
+                          padx=28, pady=(14, 22))
+
+        self.transient(parent)
+        self.after(10, self.grab_set)   # CTkToplevel must map before grabbing
+        self.update_idletasks()
+        self._center_on(parent)
+
+    def _center_on(self, parent):
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
+
+    def _choose(self, diff):
+        self.destroy()
+        self.on_choose(diff)
 
 
 def main():
