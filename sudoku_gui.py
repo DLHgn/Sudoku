@@ -263,8 +263,8 @@ class SudokuGUI:
 
     def _render_cell_text(self, rc):
         """Draw the cell's contents on the canvas: a big centered value, or a
-        3x3 grid of notes filled by ENTRY ORDER (1st -> top-left, 2nd ->
-        top-middle, ... reading across), or nothing."""
+        3x3 grid of notes in FIXED positions by digit value (1 -> top-left,
+        2 -> top-middle, ... 9 -> bottom-right), or nothing."""
         self.canvas.delete(self._content_tag(rc))
         if rc not in self.cell_origin:
             return
@@ -281,8 +281,10 @@ class SudokuGUI:
         elif notes:
             color = _resolve(NOTE_FG, mode)
             third = CELL_PX / 3
-            for i, n in enumerate(notes[:9]):
-                sr, sc = divmod(i, 3)            # fill across then down
+            for n in notes:
+                if not 1 <= n <= 9:
+                    continue
+                sr, sc = divmod(n - 1, 3)       # fixed slot from digit value
                 cx = ox + third * (sc + 0.5)
                 cy = oy + third * (sr + 0.5)
                 self.canvas.create_text(cx, cy, text=str(n), fill=color,
