@@ -82,6 +82,7 @@ DEFAULT_SETTINGS = {
 APPEARANCES = ["System", "Light", "Dark"]
 LINE_MIN, LINE_MAX = 1, 8
 CELL_PX = 46
+UNDO_LIMIT = 100    # cap on stored undo snapshots (bounds memory)
 
 
 def _contrast_text(bg_hex):
@@ -185,6 +186,8 @@ class SudokuGUI:
         self.solved_cells = set()  # (r, c) filled by the Solve button
         self.selected = None
         self.notes_mode = False  # when True, typed digits toggle notes
+        self._undo_stack = []    # snapshots of prior states (most recent last)
+        self._redo_stack = []    # snapshots undone, redo-able until a new action
         self._generating = False
         self._gen_result = None
         self.cache = puzzle_cache.PuzzleCache()  # rolling per-tier puzzle store
@@ -214,6 +217,15 @@ class SudokuGUI:
                              lambda ev: self._on_key(ev, self.selected, False))
         self.focus_sink.bind("<Shift-Key>",
                              lambda ev: self._on_key(ev, self.selected, True))
+        # Undo/redo accelerators. These are MORE specific than <Key>, so Tk fires
+        # them instead of the digit handler; ⌘ on macOS, Ctrl elsewhere. Bound on
+        # the focus sink (which holds focus during play) so they aren't swallowed
+        # by its <Key> "break".
+        for seq in ("<Command-z>", "<Control-z>"):
+            self.focus_sink.bind(seq, self._on_undo_key)
+        for seq in ("<Command-Shift-Z>", "<Command-Shift-z>",
+                    "<Control-Shift-Z>", "<Control-Shift-z>", "<Control-y>"):
+            self.focus_sink.bind(seq, self._on_redo_key)
 
         self.canvas.bind("<Button-1>", self._on_click)
 
@@ -398,6 +410,16 @@ class SudokuGUI:
         ctk.CTkButton(self.bar, text="Settings", width=84,
                       command=self.open_settings).grid(row=0, column=4, padx=4)
 
+        # Undo/redo on a second, centered row so the window stays board-width.
+        hist = ctk.CTkFrame(self.bar, fg_color="transparent")
+        hist.grid(row=1, column=0, columnspan=5, pady=(8, 0))
+        self.undo_btn = ctk.CTkButton(hist, text="Undo", width=84,
+                                      command=self.undo)
+        self.undo_btn.grid(row=0, column=0, padx=4)
+        self.redo_btn = ctk.CTkButton(hist, text="Redo", width=84,
+                                      command=self.redo)
+        self.redo_btn.grid(row=0, column=1, padx=4)
+
         self.status = ctk.CTkLabel(self.root, text="")
         self.status.grid(row=3, column=0, pady=(0, 12))
 
@@ -500,6 +522,7 @@ class SudokuGUI:
         for rc in self.all_cells:
             self._paint_cell(rc)
             self._render_cell_text(rc)
+        self._reset_history()       # a fresh puzzle starts with empty history
 
     # ---- interaction -----------------------------------------------------
 
@@ -563,6 +586,7 @@ class SudokuGUI:
         return "break"              # ignore everything else (letters, etc.)
 
     def _set_value(self, rc, d):
+        self._push_undo()
         self.values[rc] = d
         self.solved_cells.discard(rc)   # a player value is no longer "solved"
         if self.settings["notes_clear"]:
@@ -598,6 +622,7 @@ class SudokuGUI:
     def _toggle_note(self, rc, d):
         if self.values.get(rc, 0) != 0:
             return                  # a cell with a big value holds no notes
+        self._push_undo()
         notes = self.notes.setdefault(rc, [])
         if d in notes:
             notes.remove(d)         # typing an existing note removes it
@@ -608,8 +633,14 @@ class SudokuGUI:
 
     def _clear_cell(self, rc):
         # Staged clear: if a big value is present, remove just the value (which
-        # reveals any preserved notes); otherwise clear the notes.
-        if self.values.get(rc, 0) != 0:
+        # reveals any preserved notes); otherwise clear the notes. Skip entirely
+        # when there's nothing to clear, so undo doesn't record a no-op.
+        has_value = self.values.get(rc, 0) != 0
+        has_notes = bool(self.notes.get(rc))
+        if not has_value and not has_notes:
+            return
+        self._push_undo()
+        if has_value:
             self.values[rc] = 0
             self.solved_cells.discard(rc)
         else:
@@ -664,6 +695,8 @@ class SudokuGUI:
             self.status.configure(text=f"{wrong} incorrect cell(s) highlighted.")
 
     def solve(self):
+        # One snapshot for the whole reveal, so a single undo restores play.
+        self._push_undo()
         for (r, c) in self.all_cells:
             rc = (r, c)
             if rc in self.given:
@@ -674,6 +707,71 @@ class SudokuGUI:
             self._paint_cell(rc)
             self._render_cell_text(rc)
         self.status.configure(text="Solution revealed.")
+
+    # ---- undo / redo -----------------------------------------------------
+
+    def _snapshot(self):
+        """Capture the mutable game state as a restorable copy. `given` is
+        immutable during play, so it isn't stored."""
+        return {
+            "values": dict(self.values),
+            "notes": {rc: list(ns) for rc, ns in self.notes.items()},
+            "solved": set(self.solved_cells),
+            "selected": self.selected,
+        }
+
+    def _restore_snapshot(self, snap):
+        """Install a snapshot as the current state and repaint the board."""
+        self.values = dict(snap["values"])
+        self.notes = {rc: list(ns) for rc, ns in snap["notes"].items()}
+        self.solved_cells = set(snap["solved"])
+        self.selected = snap["selected"]
+        self._refresh_board()
+
+    def _push_undo(self):
+        """Record the current state before a mutating action; clears the redo
+        stack (a new action invalidates any redo path)."""
+        self._undo_stack.append(self._snapshot())
+        if len(self._undo_stack) > UNDO_LIMIT:
+            self._undo_stack.pop(0)         # drop oldest to bound memory
+        self._redo_stack.clear()
+        self._update_history_buttons()
+
+    def _reset_history(self):
+        """Drop all undo/redo history (used when a new puzzle loads)."""
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._update_history_buttons()
+
+    def undo(self):
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot())
+        self._restore_snapshot(self._undo_stack.pop())
+        self._update_history_buttons()
+        self.status.configure(text="Undid last move.")
+
+    def redo(self):
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot())
+        self._restore_snapshot(self._redo_stack.pop())
+        self._update_history_buttons()
+        self.status.configure(text="Redid move.")
+
+    def _update_history_buttons(self):
+        self.undo_btn.configure(
+            state="normal" if self._undo_stack else "disabled")
+        self.redo_btn.configure(
+            state="normal" if self._redo_stack else "disabled")
+
+    def _on_undo_key(self, event):
+        self.undo()
+        return "break"
+
+    def _on_redo_key(self, event):
+        self.redo()
+        return "break"
 
 
 class SettingsDialog(ctk.CTkToplevel):
