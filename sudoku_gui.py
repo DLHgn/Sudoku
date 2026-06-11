@@ -74,7 +74,7 @@ DEFAULT_SETTINGS = {
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
     "notes_clear": True,        # entering a big number clears that cell's notes
-    "peer_notes_clear": True,   # a correct entry clears that digit's notes in peers
+    "peer_notes_clear": True,   # placing a digit clears that digit's notes in peers
     "highlight_related": True,  # tint matching numbers + selection's row/col
     "difficulty": DEFAULT_DIFFICULTY,  # current difficulty tier
 }
@@ -591,10 +591,10 @@ class SudokuGUI:
         self.solved_cells.discard(rc)   # a player value is no longer "solved"
         if self.settings["notes_clear"]:
             self.notes[rc] = []     # entering a real number clears notes (setting)
-        # When a correct value is placed, that digit can no longer go in any
-        # peer cell, so strip it from their pencil notes (setting, default on).
-        if (self.settings["peer_notes_clear"] and self.solution is not None
-                and d == self.solution[rc[0]][rc[1]]):
+        # Placing a digit removes it as a pencil-mark candidate from every peer
+        # (row/column/box), regardless of correctness — a mistaken entry is
+        # recoverable via undo. Gated on the peer_notes_clear setting.
+        if self.settings["peer_notes_clear"]:
             self._clear_peer_notes(rc, d)
         # The selection's value just changed, so which cells "match" changes too.
         self._refresh_board()
@@ -865,7 +865,7 @@ class SettingsDialog(ctk.CTkToplevel):
         row += 1
 
         # Peer-notes-clear toggle
-        ctk.CTkLabel(self, text="Correct entry clears peer notes").grid(
+        ctk.CTkLabel(self, text="Entry clears peer notes").grid(
             row=row, column=0, sticky="w", **pad)
         self.peernotes_switch = ctk.CTkSwitch(
             self, text="", command=self._toggle_peernotes)
