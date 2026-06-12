@@ -507,12 +507,12 @@ class SudokuGUI:
                                    text_color=("#6a6a6a", "#9a9a9a"))
         self.status.grid(row=4, column=0, pady=(2, 12))
 
-        self._build_pause_overlay()
+        self.pause_overlay = None   # created on pause, destroyed on resume
 
-    def _build_pause_overlay(self):
-        """A full-window cover shown while paused: hides the puzzle (anti-peek)
-        and blocks the controls behind it. Spans all rows; lifted when shown,
-        grid_remove'd when hidden."""
+    def _show_pause_overlay(self):
+        """Build a fresh full-window cover with the pause menu. Created anew each
+        pause (and destroyed on resume) so no stale frame lingers — grid_remove
+        of an overlapping frame doesn't reliably repaint the board on macOS."""
         self.pause_overlay = ctk.CTkFrame(self.root, corner_radius=0)
         self.pause_overlay.grid(row=0, column=0, rowspan=5, sticky="nsew")
         self.pause_overlay.grid_rowconfigure(0, weight=1)
@@ -531,7 +531,7 @@ class SudokuGUI:
         ctk.CTkButton(inner, text="Settings", width=200, height=42, corner_radius=8,
                       command=self.open_settings, **_ghost_button_kwargs()
                       ).grid(row=3, column=0, pady=5)
-        self.pause_overlay.grid_remove()        # hidden until paused
+        self.pause_overlay.lift()               # cover everything behind it
 
     def _new_game_clicked(self):
         # Opens the difficulty picker (defaulting to the current tier); the
@@ -1110,15 +1110,18 @@ class SudokuGUI:
             return
         self._paused = True
         self._stop_timer()
-        self.pause_overlay.grid()
-        self.pause_overlay.lift()           # cover everything behind it
+        self._show_pause_overlay()
         self.status.configure(text="Paused.")
 
     def _resume(self):
         if not self._paused:
             return
         self._paused = False
-        self.pause_overlay.grid_remove()
+        if self.pause_overlay is not None:
+            self.pause_overlay.destroy()    # destroy (not hide) so the region repaints
+            self.pause_overlay = None
+        self._layout_grid()                 # force the board to redraw beneath
+        self.root.update_idletasks()
         self._sync_timer_to_board()         # resume timing unless already solved
         self.focus_sink.focus_set()
         self.status.configure(text="")
