@@ -216,6 +216,7 @@ class SudokuGUI:
         self.solved_cells = set()  # (r, c) filled by the Solve button
         self.selected = None
         self.notes_mode = False  # when True, typed digits toggle notes
+        self._paused = False     # when True, the pause overlay covers the window
         self._undo_stack = []    # snapshots of prior states (most recent last)
         self._redo_stack = []    # snapshots undone, redo-able until a new action
         self._timer_start = None  # monotonic ts when the clock last started
@@ -260,6 +261,11 @@ class SudokuGUI:
         for seq in ("<Command-Shift-Z>", "<Command-Shift-z>",
                     "<Control-Shift-Z>", "<Control-Shift-z>", "<Control-y>"):
             self.focus_sink.bind(seq, self._on_redo_key)
+        # Esc toggles pause/menu. Bound on the focus sink (more specific than its
+        # <Key> "break") AND on root, so it fires whether focus is on the sink or
+        # on an overlay button. Open dialogs grab Esc for their own Cancel first.
+        self.focus_sink.bind("<Escape>", self._on_escape)
+        self.root.bind("<Escape>", self._on_escape)
 
         self.canvas.bind("<Button-1>", self._on_click)
 
@@ -435,11 +441,19 @@ class SudokuGUI:
                                         font=("Helvetica", 18, "bold"))
         self.timer_label.grid(row=0, column=1)  # centered by the weighted column
 
+        # Right cluster: pause + settings gear.
+        right_hdr = ctk.CTkFrame(header, fg_color="transparent")
+        right_hdr.grid(row=0, column=2, sticky="e")
+        self.pause_btn = ctk.CTkButton(
+            right_hdr, text="\u23f8", width=40, height=34, corner_radius=8,
+            font=("Helvetica", 18), command=self._toggle_pause,
+            **_ghost_button_kwargs())
+        self.pause_btn.grid(row=0, column=0, padx=(0, 6))
         self.settings_btn = ctk.CTkButton(
-            header, text="\u2699", width=40, height=34, corner_radius=8,
+            right_hdr, text="\u2699", width=40, height=34, corner_radius=8,
             font=("Helvetica", 20), command=self.open_settings,
             **_ghost_button_kwargs())
-        self.settings_btn.grid(row=0, column=2, sticky="e")
+        self.settings_btn.grid(row=0, column=1)
 
         # ---- number palette: 1-9, places into the selected cell and dims when
         # all 9 of a digit are on the board (mouse-only play + 'what's left' aid).
@@ -492,6 +506,32 @@ class SudokuGUI:
         self.status = ctk.CTkLabel(self.root, text="",
                                    text_color=("#6a6a6a", "#9a9a9a"))
         self.status.grid(row=4, column=0, pady=(2, 12))
+
+        self._build_pause_overlay()
+
+    def _build_pause_overlay(self):
+        """A full-window cover shown while paused: hides the puzzle (anti-peek)
+        and blocks the controls behind it. Spans all rows; lifted when shown,
+        grid_remove'd when hidden."""
+        self.pause_overlay = ctk.CTkFrame(self.root, corner_radius=0)
+        self.pause_overlay.grid(row=0, column=0, rowspan=5, sticky="nsew")
+        self.pause_overlay.grid_rowconfigure(0, weight=1)
+        self.pause_overlay.grid_columnconfigure(0, weight=1)
+
+        inner = ctk.CTkFrame(self.pause_overlay, fg_color="transparent")
+        inner.grid(row=0, column=0)             # centered by the weighted cell
+        ctk.CTkLabel(inner, text="Paused",
+                     font=("Helvetica", 30, "bold")).grid(
+                         row=0, column=0, pady=(0, 20))
+        ctk.CTkButton(inner, text="Resume", width=200, height=42, corner_radius=8,
+                      command=self._resume).grid(row=1, column=0, pady=5)
+        ctk.CTkButton(inner, text="New Game", width=200, height=42, corner_radius=8,
+                      command=self._pause_new_game, **_ghost_button_kwargs()
+                      ).grid(row=2, column=0, pady=5)
+        ctk.CTkButton(inner, text="Settings", width=200, height=42, corner_radius=8,
+                      command=self.open_settings, **_ghost_button_kwargs()
+                      ).grid(row=3, column=0, pady=5)
+        self.pause_overlay.grid_remove()        # hidden until paused
 
     def _new_game_clicked(self):
         # Opens the difficulty picker (defaulting to the current tier); the
@@ -611,6 +651,8 @@ class SudokuGUI:
         return None
 
     def _on_click(self, event):
+        if self._paused:
+            return                    # board is covered; ignore stray clicks
         rc = self._cell_at(self.canvas.canvasx(event.x),
                             self.canvas.canvasy(event.y))
         if rc is not None:
@@ -660,6 +702,8 @@ class SudokuGUI:
     def _on_key(self, event, rc, shift):
         """Handle a keystroke for the selected cell. `shift` is True when from
         the <Shift-Key> binding. Returns 'break' to suppress default handling."""
+        if self._paused:
+            return "break"          # input is frozen while the menu is up
         key = event.keysym
         # Navigation (arrows / WASD) works regardless of what's selected — even
         # on a given cell or with nothing selected yet — so handle it first.
@@ -1053,6 +1097,45 @@ class SudokuGUI:
         else:
             self.timer_label.grid_remove()
             self._cancel_timer_job()
+
+    # ---- pause -----------------------------------------------------------
+    # Pausing freezes the clock and covers the whole window with a menu overlay
+    # (Resume / New Game / Settings). The cover hides the puzzle and blocks the
+    # controls behind it; keyboard input is gated in _on_key. Because the timer
+    # stops on pause and re-syncs on resume, `_timer_elapsed()` excludes paused
+    # time — the basis for an accurate best-time later (hook in `_check_win`).
+
+    def _pause(self):
+        if self._paused or self._generating:
+            return
+        self._paused = True
+        self._stop_timer()
+        self.pause_overlay.grid()
+        self.pause_overlay.lift()           # cover everything behind it
+        self.status.configure(text="Paused.")
+
+    def _resume(self):
+        if not self._paused:
+            return
+        self._paused = False
+        self.pause_overlay.grid_remove()
+        self._sync_timer_to_board()         # resume timing unless already solved
+        self.focus_sink.focus_set()
+        self.status.configure(text="")
+
+    def _toggle_pause(self):
+        if self._generating:
+            return
+        self._resume() if self._paused else self._pause()
+
+    def _pause_new_game(self):
+        # From the pause menu: leave the paused state, then open the picker.
+        self._resume()
+        self._new_game_clicked()
+
+    def _on_escape(self, event):
+        self._toggle_pause()
+        return "break"
 
 
 class SettingsDialog(ctk.CTkToplevel):
