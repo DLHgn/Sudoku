@@ -667,6 +667,11 @@ class SudokuGUI:
         if nav is not None:
             self._move_selection(*nav)
             return "break"
+        # Hint shortcut ('q', near WASD for left-hand reach). hint() does its own
+        # selection/given guarding, so handle it before the guard below.
+        if key in ("q", "Q"):
+            self.hint()
+            return "break"
         if rc is None or rc in self.given:
             return "break"          # nothing selected, or a clue cell
         # Resolve the digit: a plain digit keysym, a shifted-symbol keysym
