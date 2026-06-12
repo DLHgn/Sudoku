@@ -451,7 +451,7 @@ class SudokuGUI:
         self.pause_btn.grid(row=0, column=0, padx=(0, 6))
         self.settings_btn = ctk.CTkButton(
             right_hdr, text="\u2699", width=40, height=34, corner_radius=8,
-            font=("Helvetica", 20), command=self.open_settings,
+            font=("Helvetica", 20), command=self._open_settings_clicked,
             **_ghost_button_kwargs())
         self.settings_btn.grid(row=0, column=1)
 
@@ -563,6 +563,13 @@ class SudokuGUI:
         SettingsDialog(self.root, self.settings,
                        on_save=self._on_settings_saved,
                        on_preview=self._on_settings_preview)
+
+    def _open_settings_clicked(self):
+        # The gear opens Settings the same way as Pause -> Settings: pause first
+        # (freeze the clock, cover the board), then show the modal on top. The
+        # game stays paused afterward; the player resumes when ready.
+        self._pause()
+        self.open_settings()
 
     def _on_settings_preview(self, draft):
         self.settings.update(draft)
