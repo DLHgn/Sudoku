@@ -523,15 +523,49 @@ class SudokuGUI:
         ctk.CTkLabel(inner, text="Paused",
                      font=("Helvetica", 30, "bold")).grid(
                          row=0, column=0, pady=(0, 20))
-        ctk.CTkButton(inner, text="Resume", width=200, height=42, corner_radius=8,
-                      command=self._resume).grid(row=1, column=0, pady=5)
-        ctk.CTkButton(inner, text="New Game", width=200, height=42, corner_radius=8,
-                      command=self._pause_new_game, **_ghost_button_kwargs()
-                      ).grid(row=2, column=0, pady=5)
-        ctk.CTkButton(inner, text="Settings", width=200, height=42, corner_radius=8,
-                      command=self.open_settings, **_ghost_button_kwargs()
-                      ).grid(row=3, column=0, pady=5)
+        # Build the menu as an ordered, keyboard-navigable list. The currently
+        # selected entry is shown accent (others ghost) — same "current = accent"
+        # cue as the difficulty picker. Arrow/WASD moves it; Enter invokes it.
+        specs = [("Resume", self._resume),
+                 ("New Game", self._pause_new_game),
+                 ("Settings", self.open_settings)]
+        self._pause_buttons = []
+        for i, (label, cmd) in enumerate(specs):
+            b = ctk.CTkButton(inner, text=label, width=200, height=42,
+                              corner_radius=8, command=cmd,
+                              **_ghost_button_kwargs())
+            b.grid(row=1 + i, column=0, pady=5)
+            self._pause_buttons.append(b)
+        self._pause_idx = 0
+        self._apply_pause_selection()
         self.pause_overlay.lift()               # cover everything behind it
+
+    def _apply_pause_selection(self):
+        """Paint the keyboard-selected pause button accent, the rest ghost."""
+        for i, b in enumerate(self._pause_buttons):
+            b.configure(**(_accent_button_kwargs() if i == self._pause_idx
+                           else _ghost_button_kwargs()))
+
+    def _move_pause_selection(self, delta):
+        """Move the pause-menu selection by delta, wrapping around."""
+        if not self._pause_buttons:
+            return
+        self._pause_idx = (self._pause_idx + delta) % len(self._pause_buttons)
+        self._apply_pause_selection()
+
+    def _on_pause_key(self, event):
+        """Keyboard handling while paused: arrows/WASD move the menu selection,
+        Enter/Space invokes it. Esc (resume) is bound separately. Returns
+        'break' to swallow the key so it never reaches the board."""
+        key = event.keysym
+        if key in ("Up", "w", "W", "Left", "a", "A"):
+            self._move_pause_selection(-1)
+        elif key in ("Down", "s", "S", "Right", "d", "D"):
+            self._move_pause_selection(1)
+        elif key in ("Return", "KP_Enter", "space"):
+            if self._pause_buttons:
+                self._pause_buttons[self._pause_idx].invoke()
+        return "break"
 
     def _new_game_clicked(self):
         # Opens the difficulty picker (defaulting to the current tier); the
@@ -694,6 +728,16 @@ class SudokuGUI:
         "W": (-1, 0), "S": (1, 0), "A": (0, -1), "D": (0, 1),
     }
 
+    # Single-key action shortcuts (both cases), clustered around WASD for
+    # left-hand reach. Values are method names; each method self-guards.
+    _ACTION_KEYS = {
+        "q": "hint", "Q": "hint",
+        "e": "undo", "E": "undo",
+        "r": "redo", "R": "redo",
+        "c": "check", "C": "check",
+        "x": "solve", "X": "solve",
+    }
+
     def _move_selection(self, dr, dc):
         """Move the selected cell by (dr, dc), clamped to the board. With no
         current selection, an arrow/WASD press selects the top-left cell."""
@@ -710,7 +754,7 @@ class SudokuGUI:
         """Handle a keystroke for the selected cell. `shift` is True when from
         the <Shift-Key> binding. Returns 'break' to suppress default handling."""
         if self._paused:
-            return "break"          # input is frozen while the menu is up
+            return self._on_pause_key(event)   # drive the pause menu instead
         key = event.keysym
         # Navigation (arrows / WASD) works regardless of what's selected — even
         # on a given cell or with nothing selected yet — so handle it first.
@@ -718,10 +762,11 @@ class SudokuGUI:
         if nav is not None:
             self._move_selection(*nav)
             return "break"
-        # Hint shortcut ('q', near WASD for left-hand reach). hint() does its own
-        # selection/given guarding, so handle it before the guard below.
-        if key in ("q", "Q"):
-            self.hint()
+        # Action shortcuts (hint/undo/redo/check/solve). Each self-guards and is
+        # selection-independent, so handle before the given/empty guard below.
+        action = self._ACTION_KEYS.get(key)
+        if action is not None:
+            getattr(self, action)()
             return "break"
         if rc is None or rc in self.given:
             return "break"          # nothing selected, or a clue cell
@@ -1118,6 +1163,9 @@ class SudokuGUI:
         self._paused = True
         self._stop_timer()
         self._show_pause_overlay()
+        # Route keys to the off-screen sink (clicking the header pause button
+        # would otherwise leave focus on it) so the menu is keyboard-drivable.
+        self.focus_sink.focus_set()
         self.status.configure(text="Paused.")
 
     def _resume(self):
@@ -1261,6 +1309,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.transient(parent)
         self.after(10, self.grab_set)  # small delay: CTkToplevel needs to map first
+        self.bind("<Escape>", lambda e: self._cancel())  # Esc closes (reverts preview)
         self.update_idletasks()
         self._center_on(parent)
 
