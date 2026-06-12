@@ -635,19 +635,49 @@ class SudokuGUI:
         "asciicircum": 6, "ampersand": 7, "asterisk": 8, "parenleft": 9,
     }
 
+    # Numpad digit keysyms (1-9). KP_0 is treated as a clear, like "0".
+    _KP_DIGIT = {f"KP_{i}": i for i in range(1, 10)}
+
+    # Selection movement: arrow keys and WASD (both cases), as (drow, dcol).
+    _NAV = {
+        "Up": (-1, 0), "Down": (1, 0), "Left": (0, -1), "Right": (0, 1),
+        "w": (-1, 0), "s": (1, 0), "a": (0, -1), "d": (0, 1),
+        "W": (-1, 0), "S": (1, 0), "A": (0, -1), "D": (0, 1),
+    }
+
+    def _move_selection(self, dr, dc):
+        """Move the selected cell by (dr, dc), clamped to the board. With no
+        current selection, an arrow/WASD press selects the top-left cell."""
+        if self.selected is None:
+            self._select((0, 0))
+            return
+        r, c = self.selected
+        nr = min(SIZE - 1, max(0, r + dr))
+        nc = min(SIZE - 1, max(0, c + dc))
+        if (nr, nc) != (r, c):
+            self._select((nr, nc))
+
     def _on_key(self, event, rc, shift):
         """Handle a keystroke for the selected cell. `shift` is True when from
         the <Shift-Key> binding. Returns 'break' to suppress default handling."""
+        key = event.keysym
+        # Navigation (arrows / WASD) works regardless of what's selected — even
+        # on a given cell or with nothing selected yet — so handle it first.
+        nav = self._NAV.get(key)
+        if nav is not None:
+            self._move_selection(*nav)
+            return "break"
         if rc is None or rc in self.given:
             return "break"          # nothing selected, or a clue cell
-        key = event.keysym
-        # Resolve the digit: prefer a plain digit keysym; otherwise translate a
-        # shifted-symbol keysym (layout-dependent) back to its digit.
+        # Resolve the digit: a plain digit keysym, a shifted-symbol keysym
+        # (layout-dependent), or a numpad digit.
         d = None
         if key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
             d = int(key)
         elif key in self._SHIFT_DIGIT:
             d = self._SHIFT_DIGIT[key]
+        elif key in self._KP_DIGIT:
+            d = self._KP_DIGIT[key]
         if d is not None:
             note_intent = self.notes_mode ^ shift   # toggle XOR Shift
             if note_intent:
