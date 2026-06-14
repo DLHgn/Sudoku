@@ -1197,12 +1197,25 @@ class SudokuGUI:
 
 
 class SettingsDialog(ctk.CTkToplevel):
-    """Modal settings dialog. Calls on_preview(dict) live and on_save(dict)."""
+    """Modal settings dialog. Calls on_preview(dict) live and on_save(dict).
+
+    Fully keyboard-drivable: Up/Down (or W/S) move the focused row, Left/Right
+    (or A/D) adjust its value (cycle dropdowns, toggle switches, move between the
+    bottom buttons), Enter/Space activates it (toggle / open color picker /
+    invoke button), Esc cancels. The focused row is shown accent — the same
+    "current = accent" cue as the pause menu and difficulty picker."""
 
     COLOR_LABELS = [("highlight_bg", "Selected cell"),
                     ("error_bg", "Error highlight")]
     WIDTH_LABELS = [("cell_line", "Cell line width"),
                     ("box_line", "Box border width")]
+    SWITCH_LABELS = [("auto_check", "Auto-check entries"),
+                     ("entry_clears_notes", "Entry clears notes"),
+                     ("highlight_related", "Highlight related cells"),
+                     ("show_timer", "Show timer")]
+
+    _FOCUS_FONT = ("Helvetica", 13, "bold")
+    _NORMAL_FONT = ("Helvetica", 13)
 
     def __init__(self, parent, current, on_save, on_preview=None):
         super().__init__(parent)
@@ -1214,12 +1227,15 @@ class SettingsDialog(ctk.CTkToplevel):
         self._original = dict(current)
         self.swatches = {}
         self.width_menus = {}
+        self._labels = {}        # setting key -> its CTkLabel (focus highlight)
 
         pad = {"padx": 12, "pady": 8}
         row = 0
 
         # Appearance mode
-        ctk.CTkLabel(self, text="Appearance").grid(row=row, column=0, sticky="w", **pad)
+        self._labels["appearance"] = ctk.CTkLabel(self, text="Appearance",
+                                                   font=self._NORMAL_FONT)
+        self._labels["appearance"].grid(row=row, column=0, sticky="w", **pad)
         self.appearance_menu = ctk.CTkOptionMenu(
             self, values=APPEARANCES, width=120, command=self._set_appearance)
         self.appearance_menu.set(self.draft["appearance"])
@@ -1228,7 +1244,9 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Color pickers
         for key, label in self.COLOR_LABELS:
-            ctk.CTkLabel(self, text=label).grid(row=row, column=0, sticky="w", **pad)
+            lbl = ctk.CTkLabel(self, text=label, font=self._NORMAL_FONT)
+            lbl.grid(row=row, column=0, sticky="w", **pad)
+            self._labels[key] = lbl
             sw = ctk.CTkButton(self, text="", width=48, height=24,
                                fg_color=self.draft[key], hover=False,
                                border_width=1, command=lambda k=key: self._pick(k))
@@ -1242,7 +1260,9 @@ class SettingsDialog(ctk.CTkToplevel):
         # Line widths (dropdowns 1..8)
         width_vals = [str(i) for i in range(LINE_MIN, LINE_MAX + 1)]
         for key, label in self.WIDTH_LABELS:
-            ctk.CTkLabel(self, text=label).grid(row=row, column=0, sticky="w", **pad)
+            lbl = ctk.CTkLabel(self, text=label, font=self._NORMAL_FONT)
+            lbl.grid(row=row, column=0, sticky="w", **pad)
+            self._labels[key] = lbl
             m = ctk.CTkOptionMenu(self, values=width_vals, width=80,
                                   command=lambda v, k=key: self._set_width(k, v))
             m.set(str(self.draft[key]))
@@ -1250,68 +1270,160 @@ class SettingsDialog(ctk.CTkToplevel):
             self.width_menus[key] = m
             row += 1
 
-        # Auto-check toggle
-        ctk.CTkLabel(self, text="Auto-check entries").grid(
-            row=row, column=0, sticky="w", **pad)
-        self.autocheck_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_autocheck)
-        if self.draft["auto_check"]:
-            self.autocheck_switch.select()
-        else:
-            self.autocheck_switch.deselect()
-        self.autocheck_switch.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
+        # Toggle switches
+        self.switches = {}
+        toggles = {"auto_check": self._toggle_autocheck,
+                   "entry_clears_notes": self._toggle_entrynotes,
+                   "highlight_related": self._toggle_highlight,
+                   "show_timer": self._toggle_timer}
+        for key, label in self.SWITCH_LABELS:
+            lbl = ctk.CTkLabel(self, text=label, font=self._NORMAL_FONT)
+            lbl.grid(row=row, column=0, sticky="w", **pad)
+            self._labels[key] = lbl
+            sw = ctk.CTkSwitch(self, text="", command=toggles[key])
+            sw.select() if self.draft[key] else sw.deselect()
+            sw.grid(row=row, column=1, sticky="w", **pad)
+            self.switches[key] = sw
+            row += 1
 
-        # Entry-clears-notes toggle (own cell + peers, combined)
-        ctk.CTkLabel(self, text="Entry clears notes").grid(
-            row=row, column=0, sticky="w", **pad)
-        self.entrynotes_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_entrynotes)
-        if self.draft["entry_clears_notes"]:
-            self.entrynotes_switch.select()
-        else:
-            self.entrynotes_switch.deselect()
-        self.entrynotes_switch.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Highlight-related toggle
-        ctk.CTkLabel(self, text="Highlight related cells").grid(
-            row=row, column=0, sticky="w", **pad)
-        self.highlight_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_highlight)
-        if self.draft["highlight_related"]:
-            self.highlight_switch.select()
-        else:
-            self.highlight_switch.deselect()
-        self.highlight_switch.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
-
-        # Show-timer toggle
-        ctk.CTkLabel(self, text="Show timer").grid(
-            row=row, column=0, sticky="w", **pad)
-        self.timer_switch = ctk.CTkSwitch(
-            self, text="", command=self._toggle_timer)
-        if self.draft["show_timer"]:
-            self.timer_switch.select()
-        else:
-            self.timer_switch.deselect()
-        self.timer_switch.grid(row=row, column=1, sticky="w", **pad)
-        row += 1
+        # Named handles (kept for clarity / any external reference).
+        self.autocheck_switch = self.switches["auto_check"]
+        self.entrynotes_switch = self.switches["entry_clears_notes"]
+        self.highlight_switch = self.switches["highlight_related"]
+        self.timer_switch = self.switches["show_timer"]
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.grid(row=row, column=0, columnspan=3, pady=(8, 14))
-        ctk.CTkButton(btns, text="Restore Defaults", width=120,
-                      command=self._restore).grid(row=0, column=0, padx=5)
-        ctk.CTkButton(btns, text="Cancel", width=90,
-                      command=self._cancel).grid(row=0, column=1, padx=5)
-        ctk.CTkButton(btns, text="Save", width=90,
-                      command=self._save).grid(row=0, column=2, padx=5)
+        self.restore_btn = ctk.CTkButton(btns, text="Restore Defaults", width=120,
+                                         command=self._restore, **_ghost_button_kwargs())
+        self.restore_btn.grid(row=0, column=0, padx=5)
+        self.cancel_btn = ctk.CTkButton(btns, text="Cancel", width=90,
+                                        command=self._cancel, **_ghost_button_kwargs())
+        self.cancel_btn.grid(row=0, column=1, padx=5)
+        self.save_btn = ctk.CTkButton(btns, text="Save", width=90,
+                                      command=self._save, **_ghost_button_kwargs())
+        self.save_btn.grid(row=0, column=2, padx=5)
+
+        # ---- keyboard navigation model -----------------------------------
+        self._nav = self._build_nav()
+        self._focus_idx = 0
+        self._apply_focus()
+        self.bind("<Key>", self._on_nav_key)
 
         self.transient(parent)
-        self.after(10, self.grab_set)  # small delay: CTkToplevel needs to map first
+        self.after(10, self._grab_and_focus)  # CTkToplevel must map before grabbing
         self.bind("<Escape>", lambda e: self._cancel())  # Esc closes (reverts preview)
         self.update_idletasks()
         self._center_on(parent)
+
+    # ---- keyboard navigation ---------------------------------------------
+
+    def _build_nav(self):
+        """Ordered list of navigable rows. Each is a dict with optional
+        left/right/activate callables and a 'key' (label to highlight) or
+        'button' (CTkButton to highlight)."""
+        n = [{"key": "appearance",
+              "left": lambda: self._cycle_appearance(-1),
+              "right": lambda: self._cycle_appearance(1),
+              "activate": lambda: self._cycle_appearance(1)}]
+        for key, _ in self.COLOR_LABELS:
+            n.append({"key": key, "activate": (lambda k=key: self._pick(k))})
+        for key, _ in self.WIDTH_LABELS:
+            n.append({"key": key,
+                      "left": (lambda k=key: self._cycle_width(k, -1)),
+                      "right": (lambda k=key: self._cycle_width(k, 1)),
+                      "activate": (lambda k=key: self._cycle_width(k, 1))})
+        for key, _ in self.SWITCH_LABELS:
+            t = (lambda k=key: self._kbd_toggle(k))
+            n.append({"key": key, "left": t, "right": t, "activate": t})
+        # Bottom buttons: a horizontal group; Left/Right move between them.
+        base = len(n)
+        for j, (btn, cmd) in enumerate(((self.restore_btn, self._restore),
+                                        (self.cancel_btn, self._cancel),
+                                        (self.save_btn, self._save))):
+            n.append({"button": btn, "activate": cmd,
+                      "left": (lambda i=base + max(0, j - 1): self._set_focus(i)),
+                      "right": (lambda i=base + min(2, j + 1): self._set_focus(i))})
+        return n
+
+    def _apply_focus(self):
+        """Paint the focused row accent (label bold/tinted, or button filled);
+        everything else normal/ghost."""
+        accent = _theme_button_colors()[0]
+        try:
+            normal = ctk.ThemeManager.theme["CTkLabel"]["text_color"]
+        except Exception:
+            normal = ("gray10", "gray90")
+        for i, item in enumerate(self._nav):
+            focused = (i == self._focus_idx)
+            if "key" in item and item["key"] in self._labels:
+                self._labels[item["key"]].configure(
+                    text_color=accent if focused else normal,
+                    font=self._FOCUS_FONT if focused else self._NORMAL_FONT)
+            if "button" in item:
+                item["button"].configure(
+                    **(_accent_button_kwargs() if focused else _ghost_button_kwargs()))
+
+    def _set_focus(self, idx):
+        self._focus_idx = idx % len(self._nav)
+        self._apply_focus()
+
+    def _move_focus(self, step):
+        self._set_focus(self._focus_idx + step)
+
+    def _focus_do(self, action):
+        """Run the focused row's handler for 'left'/'right'/'activate' if any."""
+        fn = self._nav[self._focus_idx].get(action)
+        if fn:
+            fn()
+
+    def _on_nav_key(self, event):
+        """Drive the form by keyboard. Returns 'break' on a handled key so the
+        focused control doesn't also act; returns None otherwise so the more
+        specific <Escape> binding still fires."""
+        k = event.keysym
+        if k in ("Up", "w", "W"):
+            self._move_focus(-1)
+        elif k in ("Down", "s", "S"):
+            self._move_focus(1)
+        elif k in ("Left", "a", "A"):
+            self._focus_do("left")
+        elif k in ("Right", "d", "D"):
+            self._focus_do("right")
+        elif k in ("Return", "KP_Enter", "space"):
+            self._focus_do("activate")
+        else:
+            return
+        return "break"
+
+    def _grab_and_focus(self):
+        self.grab_set()
+        self.focus_set()                 # so <Key> reaches the dialog
+
+    def _cycle_appearance(self, step):
+        i = APPEARANCES.index(self.draft["appearance"])
+        val = APPEARANCES[(i + step) % len(APPEARANCES)]
+        self.appearance_menu.set(val)
+        self._set_appearance(val)
+
+    def _cycle_width(self, key, step):
+        vals = list(range(LINE_MIN, LINE_MAX + 1))
+        i = vals.index(int(self.draft[key]))
+        val = vals[(i + step) % len(vals)]
+        self.width_menus[key].set(str(val))
+        self._set_width(key, str(val))
+
+    def _kbd_toggle(self, key):
+        """Flip a switch from the keyboard, then run its normal command so the
+        draft + live preview stay in one place."""
+        sw = self.switches[key]
+        sw.deselect() if sw.get() else sw.select()
+        {"auto_check": self._toggle_autocheck,
+         "entry_clears_notes": self._toggle_entrynotes,
+         "highlight_related": self._toggle_highlight,
+         "show_timer": self._toggle_timer}[key]()
+
+    # ---- mouse plumbing / shared helpers ---------------------------------
 
     def _center_on(self, parent):
         px, py = parent.winfo_rootx(), parent.winfo_rooty()
@@ -1364,18 +1476,10 @@ class SettingsDialog(ctk.CTkToplevel):
             self.width_menus[key].set(str(self.draft[key]))
         self.draft["appearance"] = DEFAULT_SETTINGS["appearance"]
         self.appearance_menu.set(self.draft["appearance"])
-        self.draft["auto_check"] = DEFAULT_SETTINGS["auto_check"]
-        (self.autocheck_switch.select if self.draft["auto_check"]
-         else self.autocheck_switch.deselect)()
-        self.draft["entry_clears_notes"] = DEFAULT_SETTINGS["entry_clears_notes"]
-        (self.entrynotes_switch.select if self.draft["entry_clears_notes"]
-         else self.entrynotes_switch.deselect)()
-        self.draft["highlight_related"] = DEFAULT_SETTINGS["highlight_related"]
-        (self.highlight_switch.select if self.draft["highlight_related"]
-         else self.highlight_switch.deselect)()
-        self.draft["show_timer"] = DEFAULT_SETTINGS["show_timer"]
-        (self.timer_switch.select if self.draft["show_timer"]
-         else self.timer_switch.deselect)()
+        for key, _ in self.SWITCH_LABELS:
+            self.draft[key] = DEFAULT_SETTINGS[key]
+            sw = self.switches[key]
+            sw.select() if self.draft[key] else sw.deselect()
         self._preview()
 
     def _cancel(self):
