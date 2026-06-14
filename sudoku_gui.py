@@ -19,7 +19,6 @@ import time
 import tkinter as tk
 
 import customtkinter as ctk
-from tkinter import colorchooser
 from tkinter import font as tkfont
 
 try:
@@ -71,6 +70,7 @@ DEFAULT_SETTINGS = {
     "appearance": "System",     # "System" | "Light" | "Dark"
     "highlight_bg": "#3b6ea5",  # selected cell (single color, both modes)
     "error_bg": "#c0392b",      # cells flagged wrong by Check
+    "accent_color": "#3a7ebf",  # focus/selection highlight (labels, options, buttons)
     "cell_line": 1,             # px, lines between cells
     "box_line": 3,              # px, the 3x3 box borders
     "auto_check": True,         # flag wrong entries when leaving a cell
@@ -101,6 +101,29 @@ def _contrast_text(bg_hex):
         return "#000000"                # unparseable -> safe default
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
     return "#000000" if luminance > 0.55 else "#ffffff"
+
+
+def _hex_to_rgb(s):
+    """Parse '#RRGGBB' / 'RRGGBB' / '#RGB' / 'RGB' into [r, g, b], or None if the
+    string isn't a valid hex color."""
+    if not isinstance(s, str):
+        return None
+    h = s.strip().lstrip("#")
+    if len(h) == 3:                       # expand shorthand like #abc
+        h = "".join(ch * 2 for ch in h)
+    if len(h) != 6:
+        return None
+    try:
+        return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    except ValueError:
+        return None
+
+
+def _rgb_to_hex(rgb):
+    """[r, g, b] -> '#RRGGBB', clamping each channel to 0..255."""
+    r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
+    return f"#{r:02X}{g:02X}{b:02X}"
+
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "sudoku_settings.json")
@@ -185,7 +208,33 @@ def _theme_button_colors():
         return ("#3a7ebf", "#1f538d"), ("#325882", "#14375e"), "#dce4ee"
 
 
+# A user-chosen accent drives the focus/selection highlight everywhere (focused
+# labels and options, selected/active buttons). None = fall back to the theme.
+_ACCENT_COLOR = None
+
+
+def _set_accent_color(color):
+    global _ACCENT_COLOR
+    _ACCENT_COLOR = color or None
+
+
+def _accent_fg():
+    """The accent color to tint focused text/options with (user or theme)."""
+    return _ACCENT_COLOR if _ACCENT_COLOR else _theme_button_colors()[0]
+
+
+def _darken(hex_color, factor=0.82):
+    """A slightly darker shade of a hex color, for button hover states."""
+    rgb = _hex_to_rgb(hex_color)
+    if rgb is None:
+        return hex_color
+    return _rgb_to_hex([v * factor for v in rgb])
+
+
 def _accent_button_kwargs():
+    if _ACCENT_COLOR:
+        return {"fg_color": _ACCENT_COLOR, "hover_color": _darken(_ACCENT_COLOR),
+                "text_color": _contrast_text(_ACCENT_COLOR), "border_width": 0}
     fg, hover, text = _theme_button_colors()
     return {"fg_color": fg, "hover_color": hover, "text_color": text,
             "border_width": 0}
@@ -589,9 +638,16 @@ class SudokuGUI:
         return _effective_mode(self.settings["appearance"])
 
     def _apply_settings(self):
+        _set_accent_color(self.settings.get("accent_color"))
         ctk.set_appearance_mode(self.settings["appearance"])
         self._layout_grid()
         self._apply_timer_visibility()
+        # The Notes toggle is the one persistent accent in the main window; keep
+        # it in step with the accent color when it's currently on.
+        if hasattr(self, "notes_btn"):
+            style = (_accent_button_kwargs() if self.notes_mode
+                     else _ghost_button_kwargs())
+            self.notes_btn.configure(text="\u270e Notes", **style)
 
     def open_settings(self):
         SettingsDialog(self.root, self.settings,
@@ -1206,7 +1262,8 @@ class SettingsDialog(ctk.CTkToplevel):
     "current = accent" cue as the pause menu and difficulty picker."""
 
     COLOR_LABELS = [("highlight_bg", "Selected cell"),
-                    ("error_bg", "Error highlight")]
+                    ("error_bg", "Error highlight"),
+                    ("accent_color", "Highlight color")]
     WIDTH_LABELS = [("cell_line", "Cell line width"),
                     ("box_line", "Box border width")]
     SWITCH_LABELS = [("auto_check", "Auto-check entries"),
@@ -1349,7 +1406,7 @@ class SettingsDialog(ctk.CTkToplevel):
     def _apply_focus(self):
         """Paint the focused row accent (label bold/tinted, or button filled);
         everything else normal/ghost."""
-        accent = _theme_button_colors()[0]
+        accent = _accent_fg()
         try:
             normal = ctk.ThemeManager.theme["CTkLabel"]["text_color"]
         except Exception:
@@ -1434,6 +1491,8 @@ class SettingsDialog(ctk.CTkToplevel):
     def _preview(self):
         if self.on_preview:
             self.on_preview(dict(self.draft))
+        if hasattr(self, "_nav"):     # repaint own focus cues with new accent
+            self._apply_focus()
 
     def _set_appearance(self, value):
         self.draft["appearance"] = value
@@ -1460,12 +1519,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self._preview()
 
     def _pick(self, key):
-        chosen = colorchooser.askcolor(color=self.draft[key],
-                                       parent=self, title="Pick a color")
-        if chosen and chosen[1]:
-            self.draft[key] = chosen[1]
-            self.swatches[key].configure(fg_color=chosen[1])
-            self._preview()
+        """Open the in-app, fully keyboard-navigable color picker. On OK it
+        returns a hex string; on Cancel it returns None and nothing changes.
+        Either way we re-grab this dialog so it stays modal afterward."""
+        def on_done(color):
+            if color:
+                self.draft[key] = color
+                self.swatches[key].configure(fg_color=color)
+                self._preview()
+            self.grab_set()              # picker released the grab on close
+            self.focus_set()             # resume keyboard nav of the form
+            self._apply_focus()
+        ColorPickerDialog(self, self.draft[key], on_done)
 
     def _restore(self):
         for key, _ in self.COLOR_LABELS:
@@ -1492,6 +1557,298 @@ class SettingsDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class ColorPickerDialog(ctk.CTkToplevel):
+    """In-app color picker, built to be fully keyboard-navigable (the native
+    OS chooser is a separate window we can't drive). Three ways to choose:
+      - PRESETS: a grid of colorblind-safe swatches (the Okabe-Ito palette).
+      - SLIDERS: R/G/B, for any color in range.
+      - HEX: type an exact value.
+    Controls match the rest of the app: Up/Down or W/S move between sections
+    (and within the preset grid), Left/Right or A/D adjust the focused control
+    (move within the grid, nudge a slider by 5, switch buttons), Enter/Space
+    activates (apply a preset / commit hex / invoke a button), Esc cancels.
+    Calls on_done(hex) on OK, or on_done(None) on Cancel/Esc."""
+
+    # Okabe-Ito: eight hues chosen to stay distinguishable across the common
+    # forms of color blindness. Laid out 4 columns x 2 rows.
+    PRESETS = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
+               "#0072B2", "#D55E00", "#CC79A7", "#000000"]
+    COLS = 4
+    STEP = 5                              # slider nudge per Left/Right press
+
+    # Section indices (the focusable rows, top to bottom).
+    SEC_PALETTE, SEC_R, SEC_G, SEC_B, SEC_HEX, SEC_BTN = range(6)
+    _CHANNEL = {SEC_R: 0, SEC_G: 1, SEC_B: 2}
+
+    _FOCUS_FONT = ("Helvetica", 13, "bold")
+    _NORMAL_FONT = ("Helvetica", 13)
+
+    def __init__(self, parent, current, on_done):
+        super().__init__(parent)
+        self.title("Pick a color")
+        self.resizable(False, False)
+        self.on_done = on_done
+        self._rgb = _hex_to_rgb(current) or [59, 110, 165]
+        self._sec = self.SEC_PALETTE
+        self._palette_idx = 0
+        self._btn_idx = 1                 # default focus = OK
+        self._neutral_border = ("#c2c2c2", "#4a4a4a")
+
+        pad = {"padx": 14, "pady": 6}
+        row = 0
+
+        ctk.CTkLabel(self, text="Pick a color",
+                     font=("Helvetica", 18, "bold")).grid(
+                         row=row, column=0, columnspan=3, padx=14, pady=(16, 4))
+        row += 1
+
+        # Live preview swatch (shows the current color + its hex, readable text).
+        self._preview = ctk.CTkLabel(self, text="", width=240, height=46,
+                                     corner_radius=8, font=("Helvetica", 15, "bold"))
+        self._preview.grid(row=row, column=0, columnspan=3, padx=14, pady=(2, 10))
+        row += 1
+
+        # ---- presets ----
+        ctk.CTkLabel(self, text="Presets",
+                     text_color=("#6a6a6a", "#9a9a9a")).grid(
+                         row=row, column=0, columnspan=3, sticky="w", padx=14)
+        row += 1
+        grid = ctk.CTkFrame(self, fg_color="transparent")
+        grid.grid(row=row, column=0, columnspan=3, padx=14, pady=(2, 8))
+        self._swatches = []
+        for i, color in enumerate(self.PRESETS):
+            gr, gc = divmod(i, self.COLS)
+            b = ctk.CTkButton(grid, text="", width=52, height=36, corner_radius=8,
+                              fg_color=color, hover=False, border_width=1,
+                              border_color=self._neutral_border,
+                              command=lambda n=i: self._choose_palette(n))
+            b.grid(row=gr, column=gc, padx=4, pady=4)
+            self._swatches.append(b)
+        row += 1
+
+        # ---- RGB sliders ----
+        self._sliders = {}
+        self._slider_labels = {}
+        self._value_labels = {}
+        for sec, name in ((self.SEC_R, "R"), (self.SEC_G, "G"), (self.SEC_B, "B")):
+            ch = self._CHANNEL[sec]
+            lbl = ctk.CTkLabel(self, text=name, width=20, font=self._NORMAL_FONT)
+            lbl.grid(row=row, column=0, sticky="w", padx=(14, 4), pady=6)
+            self._slider_labels[sec] = lbl
+            s = ctk.CTkSlider(self, from_=0, to=255, number_of_steps=255, width=180,
+                              command=lambda v, c=ch, x=sec: self._on_slider(c, v, x))
+            s.set(self._rgb[ch])
+            s.grid(row=row, column=1, padx=4, pady=6)
+            self._sliders[sec] = s
+            vlbl = ctk.CTkLabel(self, text="", width=34, font=("Helvetica", 13))
+            vlbl.grid(row=row, column=2, sticky="w", padx=(4, 14), pady=6)
+            self._value_labels[sec] = vlbl
+            row += 1
+
+        # ---- hex entry ----
+        self._hex_label = ctk.CTkLabel(self, text="Hex", width=20,
+                                       font=self._NORMAL_FONT)
+        self._hex_label.grid(row=row, column=0, sticky="w", padx=(14, 4), pady=(8, 6))
+        self._hex_entry = ctk.CTkEntry(self, width=120, placeholder_text="#RRGGBB")
+        self._hex_entry.grid(row=row, column=1, columnspan=2, sticky="w",
+                             padx=4, pady=(8, 6))
+        self._hex_entry.bind("<FocusIn>", lambda e: self._set_section_hex())
+        row += 1
+
+        # ---- buttons ----
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=row, column=0, columnspan=3, pady=(10, 16))
+        self._cancel_btn = ctk.CTkButton(btns, text="Cancel", width=110, height=34,
+                                         corner_radius=8, command=self._cancel,
+                                         **_ghost_button_kwargs())
+        self._cancel_btn.grid(row=0, column=0, padx=6)
+        self._ok_btn = ctk.CTkButton(btns, text="OK", width=110, height=34,
+                                     corner_radius=8, command=self._commit,
+                                     **_ghost_button_kwargs())
+        self._ok_btn.grid(row=0, column=1, padx=6)
+        self._buttons = [self._cancel_btn, self._ok_btn]
+
+        self._refresh_outputs()
+        self._apply_focus()
+        self.bind("<Key>", self._on_key)
+        self.bind("<Escape>", lambda e: self._cancel())
+
+        self.transient(parent)
+        self.after(10, self._grab_and_focus)
+        self.update_idletasks()
+        self._center_on(parent)
+
+    # ---- color state -----------------------------------------------------
+
+    def set_color(self, rgb):
+        """Adopt an [r,g,b] color: sync the three sliders, then refresh outputs."""
+        self._rgb = [max(0, min(255, int(round(v)))) for v in rgb]
+        for sec, ch in self._CHANNEL.items():
+            self._sliders[sec].set(self._rgb[ch])
+        self._refresh_outputs()
+
+    def _set_channel(self, ch, value):
+        value = max(0, min(255, int(value)))
+        self._rgb[ch] = value
+        for sec, c in self._CHANNEL.items():
+            if c == ch:
+                self._sliders[sec].set(value)
+        self._refresh_outputs()
+
+    def _refresh_outputs(self):
+        """Push the current color to the preview, value labels, and hex field."""
+        hx = _rgb_to_hex(self._rgb)
+        self._preview.configure(fg_color=hx, text=hx, text_color=_contrast_text(hx))
+        for sec, ch in self._CHANNEL.items():
+            self._value_labels[sec].configure(text=f"{self._rgb[ch]:>3}")
+        self._hex_entry.delete(0, "end")
+        self._hex_entry.insert(0, hx)
+
+    def _on_slider(self, ch, value, sec):
+        # Mouse drag: this slider is the source, so update without re-setting it.
+        self._rgb[ch] = int(round(value))
+        self._sec = sec
+        self._refresh_outputs()
+        self._apply_focus()
+
+    def _choose_palette(self, i):
+        self._sec = self.SEC_PALETTE
+        self._palette_idx = i
+        self.focus_set()
+        self.set_color(_hex_to_rgb(self.PRESETS[i]))
+        self._apply_focus()
+
+    def _commit_hex(self):
+        rgb = _hex_to_rgb(self._hex_entry.get())
+        if rgb is not None:
+            self.set_color(rgb)          # also normalizes the field text
+        else:
+            self._refresh_outputs()      # invalid -> restore the last good value
+
+    # ---- focus painting --------------------------------------------------
+
+    def _apply_focus(self):
+        accent = _accent_fg()
+        try:
+            normal = ctk.ThemeManager.theme["CTkLabel"]["text_color"]
+        except Exception:
+            normal = ("gray10", "gray90")
+        # Presets: outline the focused swatch.
+        for i, b in enumerate(self._swatches):
+            hot = (self._sec == self.SEC_PALETTE and i == self._palette_idx)
+            b.configure(border_width=3 if hot else 1,
+                        border_color=accent if hot else self._neutral_border)
+        # Slider rows + hex: tint/bold the focused label.
+        for sec, lbl in list(self._slider_labels.items()) + [(self.SEC_HEX,
+                                                               self._hex_label)]:
+            hot = (self._sec == sec)
+            lbl.configure(text_color=accent if hot else normal,
+                          font=self._FOCUS_FONT if hot else self._NORMAL_FONT)
+        # Buttons: focused one filled accent, the other ghost.
+        for i, b in enumerate(self._buttons):
+            hot = (self._sec == self.SEC_BTN and i == self._btn_idx)
+            b.configure(**(_accent_button_kwargs() if hot else _ghost_button_kwargs()))
+
+    # ---- keyboard navigation --------------------------------------------
+
+    def _enter_section(self, sec, step):
+        self._sec = max(0, min(self.SEC_BTN, sec))
+        if self._sec == self.SEC_PALETTE:
+            # Entering from above lands top-left; from below, bottom-left.
+            self._palette_idx = 0 if step > 0 else len(self.PRESETS) - self.COLS
+        if self._sec == self.SEC_HEX:
+            self._hex_entry.focus_set()  # let typing flow to the field
+        else:
+            self.focus_set()
+        self._apply_focus()
+
+    def _nav_vertical(self, step):
+        if self._sec == self.SEC_PALETTE:
+            new = self._palette_idx + step * self.COLS
+            if 0 <= new < len(self.PRESETS):
+                self._palette_idx = new
+                self._apply_focus()
+                return
+        self._enter_section(self._sec + step, step)
+
+    def _nav_horizontal(self, step):
+        if self._sec == self.SEC_PALETTE:
+            self._palette_idx = max(0, min(len(self.PRESETS) - 1,
+                                           self._palette_idx + step))
+            self._apply_focus()
+        elif self._sec in self._CHANNEL:
+            ch = self._CHANNEL[self._sec]
+            self._set_channel(ch, self._rgb[ch] + step * self.STEP)
+        elif self._sec == self.SEC_BTN:
+            self._btn_idx = max(0, min(len(self._buttons) - 1,
+                                       self._btn_idx + step))
+            self._apply_focus()
+
+    def _activate(self):
+        if self._sec == self.SEC_PALETTE:
+            self.set_color(_hex_to_rgb(self.PRESETS[self._palette_idx]))
+        elif self._sec == self.SEC_HEX:
+            self._commit_hex()
+        elif self._sec == self.SEC_BTN:
+            self._buttons[self._btn_idx].invoke()
+
+    def _on_key(self, event):
+        k = event.keysym
+        # In the hex field, only steal Up/Down (and W/S, which aren't hex chars)
+        # for navigation and Enter to commit; everything else types into the
+        # field (a-f digits, Left/Right cursor, Backspace, etc).
+        if self._sec == self.SEC_HEX:
+            if k in ("Up", "w", "W"):
+                self._nav_vertical(-1)
+            elif k in ("Down", "s", "S"):
+                self._nav_vertical(1)
+            elif k in ("Return", "KP_Enter"):
+                self._commit_hex()
+            else:
+                return
+            return "break"
+        if k in ("Up", "w", "W"):
+            self._nav_vertical(-1)
+        elif k in ("Down", "s", "S"):
+            self._nav_vertical(1)
+        elif k in ("Left", "a", "A"):
+            self._nav_horizontal(-1)
+        elif k in ("Right", "d", "D"):
+            self._nav_horizontal(1)
+        elif k in ("Return", "KP_Enter", "space"):
+            self._activate()
+        else:
+            return
+        return "break"
+
+    def _set_section_hex(self):
+        # Mouse click into the hex field: keep nav state in sync.
+        self._sec = self.SEC_HEX
+        self._apply_focus()
+
+    def _grab_and_focus(self):
+        self.grab_set()
+        self.focus_set()
+
+    # ---- close paths -----------------------------------------------------
+
+    def _commit(self):
+        self._finish(_rgb_to_hex(self._rgb))
+
+    def _cancel(self):
+        self._finish(None)
+
+    def _finish(self, color):
+        self.on_done(color)              # caller re-grabs the settings dialog
+        self.destroy()
+
+    def _center_on(self, parent):
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 3}")
+
+
 class NewGameDialog(ctk.CTkToplevel):
     """Modal difficulty picker shown when starting a new game. The current
     difficulty is highlighted (accent); clicking any tier starts that game
@@ -1512,7 +1869,8 @@ class NewGameDialog(ctk.CTkToplevel):
 
         # Current tier renders accent (default CTkButton); the rest are ghost.
         for i, diff in enumerate(DIFFICULTY_ORDER):
-            style = {} if diff == current else _ghost_button_kwargs()
+            style = (_accent_button_kwargs() if diff == current
+                     else _ghost_button_kwargs())
             ctk.CTkButton(self, text=diff, width=240, height=42, corner_radius=8,
                           command=lambda d=diff: self._choose(d),
                           **style).grid(row=2 + i, column=0, padx=28, pady=4)
